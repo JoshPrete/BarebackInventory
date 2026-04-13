@@ -24,3 +24,27 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/*
+ * Form controls must not inherit body foreground in dark OS mode — pages use light
+ * fields (white/zinc) but body --foreground stays light gray, which makes typed text
+ * nearly invisible. Force high-contrast text in inputs, textareas, and selects.
+ */
+input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not(
+    [type="range"]
+  ):not([type="color"]),
+textarea,
+select {
+  color: #0a0a0a;
+  background-color: #ffffff;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #71717a;
+}
+
+select option {
+  color: #0a0a0a;
+  background-color: #ffffff;
+}

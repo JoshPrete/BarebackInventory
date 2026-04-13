@@ -1,0 +1,201 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ComponentType {
+  BILTONG_BULK
+  PACKAGING
+}
+
+enum StockMovementType {
+  RECEIPT
+  SALE
+  ADJUSTMENT
+}
+
+enum PackedStockMovementType {
+  PACK
+  SALE
+  ADJUSTMENT
+}
+
+model Component {
+  id             String              @id @default(uuid())
+  name           String
+  type           ComponentType
+  unit           String
+  reorderPoint   Float
+  reorderQty     Float
+  createdAt      DateTime            @default(now())
+  skuComponentRules SKUComponentRule[]
+  stockMovements StockMovement[]
+  receiptLines   ReceiptLine[]
+}
+
+model Receipt {
+  id           String        @id @default(uuid())
+  supplierName String
+  invoiceRef   String?
+  receivedAt   DateTime
+  note         String?
+  createdAt    DateTime      @default(now())
+  lines        ReceiptLine[]
+
+  @@index([receivedAt])
+}
+
+model ReceiptLine {
+  id             String          @id @default(uuid())
+  receiptId      String
+  componentId    String
+  quantity       Float
+  unitCost       Float?
+  receipt        Receipt         @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  component      Component       @relation(fields: [componentId], references: [id], onDelete: Restrict)
+  stockMovements StockMovement[]
+
+  @@index([receiptId])
+  @@index([componentId])
+}
+
+model Supplier {
+  id           String  @id @default(uuid())
+  name         String
+  email        String?
+  leadTimeDays Int?
+}
+
+model SellableSKU {
+  id                 String                 @id @default(uuid())
+  name               String
+  sku                String                 @unique
+  isBundle           Boolean                @default(false)
+  createdAt          DateTime               @default(now())
+  skuComponentRules  SKUComponentRule[]
+  bundleAsParent     BundleComponent[]      @relation("BundleParent")
+  bundleAsChild      BundleComponent[]      @relation("BundleChild")
+  manualSaleLines    ManualSaleLine[]
+  packedStockMovements PackedStockMovement[]
+  shopifyVariantMapping ShopifyVariantMapping?
+}
+
+/// Links an internal sellable SKU to Shopify Admin API resources (variant + optional inventory item GIDs).
+model ShopifyVariantMapping {
+  id                      String      @id @default(uuid())
+  sellableSkuId           String      @unique
+  shopifyVariantGid       String
+  shopifyInventoryItemGid String?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  sellableSku             SellableSKU @relation(fields: [sellableSkuId], references: [id], onDelete: Cascade)
+
+  @@index([shopifyVariantGid])
+}
+
+model ManualSale {
+  id                   String                 @id @default(uuid())
+  orderRef             String?
+  createdAt            DateTime               @default(now())
+  lines                ManualSaleLine[]
+  stockMovements       StockMovement[]
+  packedStockMovements PackedStockMovement[]
+
+  @@index([createdAt])
+}
+
+model ManualSaleLine {
+  id            String      @id @default(uuid())
+  manualSaleId  String
+  sellableSkuId String
+  quantity      Float
+  manualSale    ManualSale  @relation(fields: [manualSaleId], references: [id], onDelete: Cascade)
+  sku           SellableSKU @relation(fields: [sellableSkuId], references: [id], onDelete: Restrict)
+
+  @@index([manualSaleId])
+  @@index([sellableSkuId])
+}
+
+model SKUComponentRule {
+  id          String      @id @default(uuid())
+  skuId       String
+  componentId String
+  qtyPerUnit  Float
+  sku         SellableSKU @relation(fields: [skuId], references: [id], onDelete: Cascade)
+  component   Component   @relation(fields: [componentId], references: [id], onDelete: Cascade)
+
+  @@index([skuId])
+  @@index([componentId])
+}
+
+model PackingRun {
+  id                 String                 @id @default(uuid())
+  createdAt          DateTime               @default(now())
+  note               String?
+  componentMovements StockMovement[]
+  packedMovements    PackedStockMovement[]
+}
+
+model PackedStockMovement {
+  id            String                  @id @default(uuid())
+  sellableSkuId String
+  qtyChange     Float
+  type          PackedStockMovementType
+  sourceType    String
+  createdAt     DateTime                @default(now())
+  note          String?
+  manualSaleId  String?
+  packingRunId  String?
+  sellableSku   SellableSKU             @relation(fields: [sellableSkuId], references: [id], onDelete: Restrict)
+  manualSale    ManualSale?             @relation(fields: [manualSaleId], references: [id], onDelete: SetNull)
+  packingRun    PackingRun?             @relation(fields: [packingRunId], references: [id], onDelete: SetNull)
+
+  @@index([sellableSkuId])
+  @@index([createdAt])
+  @@index([manualSaleId])
+  @@index([packingRunId])
+}
+
+model BundleComponent {
+  id           String      @id @default(uuid())
+  parentSkuId  String
+  childSkuId   String
+  qty          Int
+  parentSku    SellableSKU @relation("BundleParent", fields: [parentSkuId], references: [id], onDelete: Cascade)
+  childSku     SellableSKU @relation("BundleChild", fields: [childSkuId], references: [id], onDelete: Cascade)
+
+  @@index([parentSkuId])
+  @@index([childSkuId])
+}
+
+model StockMovement {
+  id             String             @id @default(uuid())
+  componentId    String
+  type           StockMovementType
+  qtyChange      Float
+  sourceType     String
+  note           String?
+  createdAt      DateTime           @default(now())
+  manualSaleId   String?
+  receiptLineId  String?
+  packingRunId   String?
+  component      Component          @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  manualSale     ManualSale?        @relation(fields: [manualSaleId], references: [id], onDelete: SetNull)
+  receiptLine    ReceiptLine?       @relation(fields: [receiptLineId], references: [id], onDelete: SetNull)
+  packingRun     PackingRun?        @relation(fields: [packingRunId], references: [id], onDelete: SetNull)
+
+  @@index([componentId])
+  @@index([createdAt])
+  @@index([manualSaleId])
+  @@index([receiptLineId])
+  @@index([packingRunId])
+}
