@@ -1,4 +1,8 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+Bareback Biltong **inventory** app (Next.js + Postgres).
+
+**→ [EASY-DEPLOY.md](./EASY-DEPLOY.md)** — short steps to host on Vercel (no jargon).
+
+---
 
 ## Getting Started
 

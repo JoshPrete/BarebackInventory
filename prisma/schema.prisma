@@ -17,6 +17,18 @@ enum ComponentType {
   PACKAGING
 }
 
+enum AlertType {
+  LOW_STOCK
+  OUT_OF_STOCK
+  REORDER_DUE
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
 enum StockMovementType {
   RECEIPT
   SALE
@@ -29,17 +41,68 @@ enum PackedStockMovementType {
   ADJUSTMENT
 }
 
-model Component {
-  id             String              @id @default(uuid())
-  name           String
-  type           ComponentType
-  unit           String
+/// Shopify product synced via syncShopifyCatalog().
+model ShopifyProduct {
+  id                String           @id @default(uuid())
+  shopifyProductGid String           @unique
+  title             String
+  handle            String
+  status            String
+  syncedAt          DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  variants          ShopifyVariant[]
+
+  @@index([shopifyProductGid])
+}
+
+/// Shopify variant synced via syncShopifyCatalog(). Linked to a ShopifyProduct.
+model ShopifyVariant {
+  id                      String         @id @default(uuid())
+  shopifyVariantGid       String         @unique
+  shopifyProductGid       String
+  title                   String
+  sku                     String?
+  price                   String
+  inventoryItemGid        String?
+  syncedAt                DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+  product                 ShopifyProduct @relation(fields: [shopifyProductGid], references: [shopifyProductGid], onDelete: Cascade)
+
+  @@index([shopifyProductGid])
+  @@index([sku])
+}
+
+/// Inventory alert — created by alertService.evaluateAlerts() when stock drops below reorderPoint.
+model Alert {
+  id             String        @id @default(uuid())
+  type           AlertType
+  severity       AlertSeverity
+  componentId    String?
+  sellableSkuId  String?
+  currentLevel   Float
   reorderPoint   Float
-  reorderQty     Float
-  createdAt      DateTime            @default(now())
+  resolvedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  component      Component?    @relation(fields: [componentId], references: [id], onDelete: SetNull)
+  sellableSku    SellableSKU?  @relation(fields: [sellableSkuId], references: [id], onDelete: SetNull)
+
+  @@index([resolvedAt])
+  @@index([componentId])
+  @@index([sellableSkuId])
+}
+
+model Component {
+  id                String              @id @default(uuid())
+  name              String
+  type              ComponentType
+  unit              String
+  reorderPoint      Float
+  reorderQty        Float
+  createdAt         DateTime            @default(now())
   skuComponentRules SKUComponentRule[]
-  stockMovements StockMovement[]
-  receiptLines   ReceiptLine[]
+  stockMovements    StockMovement[]
+  receiptLines      ReceiptLine[]
+  alerts            Alert[]
 }
 
 model Receipt {
@@ -84,9 +147,10 @@ model SellableSKU {
   skuComponentRules  SKUComponentRule[]
   bundleAsParent     BundleComponent[]      @relation("BundleParent")
   bundleAsChild      BundleComponent[]      @relation("BundleChild")
-  manualSaleLines    ManualSaleLine[]
+  manualSaleLines      ManualSaleLine[]
   packedStockMovements PackedStockMovement[]
   shopifyVariantMapping ShopifyVariantMapping?
+  alerts               Alert[]
 }
 
 /// Links an internal sellable SKU to Shopify Admin API resources (variant + optional inventory item GIDs).
@@ -111,15 +175,18 @@ model ManualSale {
   packedStockMovements PackedStockMovement[]
 
   @@index([createdAt])
+  @@index([orderRef])
 }
 
 model ManualSaleLine {
-  id            String      @id @default(uuid())
-  manualSaleId  String
-  sellableSkuId String
-  quantity      Float
-  manualSale    ManualSale  @relation(fields: [manualSaleId], references: [id], onDelete: Cascade)
-  sku           SellableSKU @relation(fields: [sellableSkuId], references: [id], onDelete: Restrict)
+  id                  String               @id @default(uuid())
+  manualSaleId        String
+  sellableSkuId       String
+  quantity            Float
+  manualSale          ManualSale           @relation(fields: [manualSaleId], references: [id], onDelete: Cascade)
+  sku                 SellableSKU          @relation(fields: [sellableSkuId], references: [id], onDelete: Restrict)
+  packedStockMovement PackedStockMovement?
+  stockMovements      StockMovement[]
 
   @@index([manualSaleId])
   @@index([sellableSkuId])
@@ -133,6 +200,7 @@ model SKUComponentRule {
   sku         SellableSKU @relation(fields: [skuId], references: [id], onDelete: Cascade)
   component   Component   @relation(fields: [componentId], references: [id], onDelete: Cascade)
 
+  @@unique([skuId, componentId])
   @@index([skuId])
   @@index([componentId])
 }
@@ -146,18 +214,22 @@ model PackingRun {
 }
 
 model PackedStockMovement {
-  id            String                  @id @default(uuid())
-  sellableSkuId String
-  qtyChange     Float
-  type          PackedStockMovementType
-  sourceType    String
-  createdAt     DateTime                @default(now())
-  note          String?
-  manualSaleId  String?
-  packingRunId  String?
-  sellableSku   SellableSKU             @relation(fields: [sellableSkuId], references: [id], onDelete: Restrict)
-  manualSale    ManualSale?             @relation(fields: [manualSaleId], references: [id], onDelete: SetNull)
-  packingRun    PackingRun?             @relation(fields: [packingRunId], references: [id], onDelete: SetNull)
+  id                String                  @id @default(uuid())
+  sellableSkuId     String
+  qtyChange         Float
+  type              PackedStockMovementType
+  sourceType        String
+  createdAt         DateTime                @default(now())
+  note              String?
+  manualSaleId      String?
+  /// Idempotency key: at most one SALE movement per ManualSaleLine.
+  /// Nullable so PACK and ADJUSTMENT rows are unaffected.
+  manualSaleLineId  String?                 @unique
+  packingRunId      String?
+  sellableSku       SellableSKU             @relation(fields: [sellableSkuId], references: [id], onDelete: Restrict)
+  manualSale        ManualSale?             @relation(fields: [manualSaleId], references: [id], onDelete: SetNull)
+  manualSaleLine    ManualSaleLine?         @relation(fields: [manualSaleLineId], references: [id], onDelete: SetNull)
+  packingRun        PackingRun?             @relation(fields: [packingRunId], references: [id], onDelete: SetNull)
 
   @@index([sellableSkuId])
   @@index([createdAt])
@@ -178,21 +250,27 @@ model BundleComponent {
 }
 
 model StockMovement {
-  id             String             @id @default(uuid())
-  componentId    String
-  type           StockMovementType
-  qtyChange      Float
-  sourceType     String
-  note           String?
-  createdAt      DateTime           @default(now())
-  manualSaleId   String?
-  receiptLineId  String?
-  packingRunId   String?
-  component      Component          @relation(fields: [componentId], references: [id], onDelete: Cascade)
-  manualSale     ManualSale?        @relation(fields: [manualSaleId], references: [id], onDelete: SetNull)
-  receiptLine    ReceiptLine?       @relation(fields: [receiptLineId], references: [id], onDelete: SetNull)
-  packingRun     PackingRun?        @relation(fields: [packingRunId], references: [id], onDelete: SetNull)
+  id               String             @id @default(uuid())
+  componentId      String
+  type             StockMovementType
+  qtyChange        Float
+  sourceType       String
+  note             String?
+  createdAt        DateTime           @default(now())
+  manualSaleId     String?
+  /// Idempotency key for sale-driven deductions.
+  /// Composite unique with componentId ensures one deduction per (line, component).
+  /// Nullable so RECEIPT and ADJUSTMENT rows are unaffected.
+  manualSaleLineId String?
+  receiptLineId    String?
+  packingRunId     String?
+  component        Component          @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  manualSale       ManualSale?        @relation(fields: [manualSaleId], references: [id], onDelete: SetNull)
+  manualSaleLine   ManualSaleLine?    @relation(fields: [manualSaleLineId], references: [id], onDelete: SetNull)
+  receiptLine      ReceiptLine?       @relation(fields: [receiptLineId], references: [id], onDelete: SetNull)
+  packingRun       PackingRun?        @relation(fields: [packingRunId], references: [id], onDelete: SetNull)
 
+  @@unique([manualSaleLineId, componentId])
   @@index([componentId])
   @@index([createdAt])
   @@index([manualSaleId])
