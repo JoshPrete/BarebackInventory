@@ -1,11 +1,21 @@
 /**
- * Single-store Shopify Admin API configuration (custom/private app or dev store).
- * OAuth-based multi-tenant apps will replace env tokens with per-shop sessions later.
+ * Shopify Admin API configuration — client-credentials flow (Dev Dashboard app).
+ *
+ * Required env vars:
+ *   SHOPIFY_SHOP          — store subdomain, e.g. "bareback-biltong"
+ *   SHOPIFY_CLIENT_ID     — Dev Dashboard app client ID
+ *   SHOPIFY_CLIENT_SECRET — Dev Dashboard app client secret
+ *
+ * Optional:
+ *   SHOPIFY_API_VERSION   — defaults to 2025-01
  */
 export type ShopifyConfig = {
-  /** e.g. bareback-biltong.myshopify.com */
+  /** e.g. "bareback-biltong" */
+  shop: string;
+  /** Derived: bareback-biltong.myshopify.com */
   shopDomain: string;
-  adminAccessToken: string;
+  clientId: string;
+  clientSecret: string;
   /** Admin API version path segment, e.g. 2025-01 */
   apiVersion: string;
 };
@@ -13,16 +23,23 @@ export type ShopifyConfig = {
 const DEFAULT_API_VERSION = "2025-01";
 
 export function getShopifyConfig(): ShopifyConfig | null {
-  const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN?.trim().toLowerCase();
-  const adminAccessToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN?.trim();
+  const shop = process.env.SHOPIFY_SHOP?.trim().toLowerCase();
+  const clientId = process.env.SHOPIFY_CLIENT_ID?.trim();
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET?.trim();
   const apiVersion =
     process.env.SHOPIFY_API_VERSION?.trim() || DEFAULT_API_VERSION;
 
-  if (!shopDomain || !adminAccessToken) {
+  if (!shop || !clientId || !clientSecret) {
     return null;
   }
 
-  return { shopDomain, adminAccessToken, apiVersion };
+  return {
+    shop,
+    shopDomain: `${shop}.myshopify.com`,
+    clientId,
+    clientSecret,
+    apiVersion,
+  };
 }
 
 export function isShopifyConfigured(): boolean {

@@ -1,36 +1,101 @@
 import { NextResponse } from "next/server";
 import { getShopifyConfig } from "@/lib/shopify/config";
-import { fetchShopifyShopName } from "@/lib/shopify/admin";
+import { getAccessToken } from "@/lib/shopify/auth";
+import { shopifyAdminGraphql } from "@/lib/shopify/admin";
+
+const PRODUCTS_PROBE = `
+  query {
+    products(first: 3) {
+      edges {
+        node {
+          id
+          title
+        }
+      }
+    }
+  }
+`;
+
+interface ProductsProbeResponse {
+  products: { edges: { node: { id: string; title: string } }[] };
+}
 
 /**
  * GET /api/integrations/shopify/health
- * Returns whether Shopify env is set and whether the Admin API accepts the token.
+ *
+ * Validates the Shopify client-credentials integration end-to-end:
+ *   1. Checks env vars are present (configured)
+ *   2. Acquires an access token via client_credentials grant
+ *   3. Runs a lightweight Admin GraphQL products probe
+ *
+ * Never returns the access token itself.
  */
 export async function GET() {
   const cfg = getShopifyConfig();
+
   if (!cfg) {
     return NextResponse.json({
       configured: false,
-      shopDomain: null,
-      shopName: null,
-      apiReachable: false,
+      shop: null,
+      authSucceeded: false,
+      productsReachable: false,
+      productTitles: [],
+      errors: ["Shopify not configured — set SHOPIFY_SHOP, SHOPIFY_CLIENT_ID, and SHOPIFY_CLIENT_SECRET"],
     });
   }
 
-  let shopName: string | null = null;
-  let apiReachable = false;
+  // ── Step 1: token acquisition ─────────────────────────────────────────────
+  let authSucceeded = false;
+  const errors: string[] = [];
+
   try {
-    shopName = await fetchShopifyShopName();
-    apiReachable = shopName != null;
-  } catch {
-    apiReachable = false;
+    await getAccessToken(cfg);
+    authSucceeded = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors.push(`Auth failed: ${msg}`);
+  }
+
+  if (!authSucceeded) {
+    return NextResponse.json({
+      configured: true,
+      shop: cfg.shop,
+      shopDomain: cfg.shopDomain,
+      apiVersion: cfg.apiVersion,
+      authSucceeded: false,
+      productsReachable: false,
+      productTitles: [],
+      errors,
+    });
+  }
+
+  // ── Step 2: Admin GraphQL products probe ──────────────────────────────────
+  let productsReachable = false;
+  let productTitles: string[] = [];
+
+  try {
+    const res = await shopifyAdminGraphql<ProductsProbeResponse>(PRODUCTS_PROBE);
+    if (res.errors?.length) {
+      errors.push(
+        `GraphQL errors: ${res.errors.map((e) => e.message).join(", ")}`,
+      );
+    } else {
+      productTitles = (res.data?.products.edges ?? []).map((e) => e.node.title);
+      productsReachable = true;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors.push(`Products query failed: ${msg}`);
   }
 
   return NextResponse.json({
     configured: true,
+    shop: cfg.shop,
     shopDomain: cfg.shopDomain,
-    shopName,
-    apiReachable,
     apiVersion: cfg.apiVersion,
+    authSucceeded,
+    productsReachable,
+    productTitles,
+    errors,
   });
 }

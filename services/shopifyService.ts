@@ -7,15 +7,16 @@
 
 import { prisma } from "@/lib/prisma";
 import { mockShopifyAdapter } from "@/adapters/shopify/mockShopifyAdapter";
+import { liveShopifyAdapter } from "@/adapters/shopify/liveShopifyAdapter";
+import { isShopifyConfigured } from "@/lib/shopify/config";
 import type { ShopifyAdapter } from "@/adapters/shopify/types";
 import { recordShopifyOrder } from "@/services/salesProcessingService";
 
-// Resolve adapter from env flag or DI when the live adapter is ready.
 function getAdapter(): ShopifyAdapter {
-  return mockShopifyAdapter;
+  return isShopifyConfigured() ? liveShopifyAdapter : mockShopifyAdapter;
 }
 
-// ─── Catalog sync (stub) ─────────────────────────────────────────────────────
+// ─── Catalog sync ─────────────────────────────────────────────────────────────
 
 export interface SyncCatalogResult {
   productsUpserted: number;
@@ -25,13 +26,120 @@ export interface SyncCatalogResult {
 /**
  * Pull all products + variants from Shopify and upsert into
  * ShopifyProduct / ShopifyVariant tables.
- * TODO: implement in the catalog-sync task.
  */
 export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
   const adapter = getAdapter();
   const products = await adapter.fetchProducts();
-  void products;
-  return { productsUpserted: 0, variantsUpserted: 0 };
+
+  let productsUpserted = 0;
+  let variantsUpserted = 0;
+
+  for (const product of products) {
+    await prisma.shopifyProduct.upsert({
+      where: { shopifyProductGid: product.shopifyProductGid },
+      create: {
+        shopifyProductGid: product.shopifyProductGid,
+        title: product.title,
+        handle: product.handle,
+        status: product.status,
+      },
+      update: {
+        title: product.title,
+        handle: product.handle,
+        status: product.status,
+        updatedAt: new Date(),
+      },
+    });
+    productsUpserted++;
+
+    for (const variant of product.variants) {
+      await prisma.shopifyVariant.upsert({
+        where: { shopifyVariantGid: variant.shopifyVariantGid },
+        create: {
+          shopifyVariantGid: variant.shopifyVariantGid,
+          shopifyProductGid: variant.shopifyProductGid,
+          title: variant.title,
+          sku: variant.sku,
+          price: variant.price,
+          inventoryItemGid: variant.inventoryItemGid,
+        },
+        update: {
+          title: variant.title,
+          sku: variant.sku,
+          price: variant.price,
+          inventoryItemGid: variant.inventoryItemGid,
+          updatedAt: new Date(),
+        },
+      });
+      variantsUpserted++;
+    }
+  }
+
+  return { productsUpserted, variantsUpserted };
+}
+
+// ─── Variant mapping queue ────────────────────────────────────────────────────
+
+export interface VariantMappingRow {
+  shopifyVariantGid: string;
+  shopifyProductGid: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  price: string;
+  /** Present when this variant has a ShopifyVariantMapping row. */
+  mappedSkuId: string | null;
+  mappedSkuCode: string | null;
+  mappedSkuName: string | null;
+}
+
+/**
+ * Return all synced Shopify variants with their current mapping status.
+ * Ordered by product GID then variant title.
+ *
+ * ShopifyVariantMapping is keyed by sellableSkuId (unique) with shopifyVariantGid
+ * as an indexed string — no FK from ShopifyVariant. Join is done in memory.
+ */
+export async function getVariantMappingQueue(): Promise<VariantMappingRow[]> {
+  const [variants, mappings] = await Promise.all([
+    prisma.shopifyVariant.findMany({
+      orderBy: [{ shopifyProductGid: "asc" }, { title: "asc" }],
+      select: {
+        shopifyVariantGid: true,
+        shopifyProductGid: true,
+        title: true,
+        sku: true,
+        price: true,
+        product: { select: { title: true } },
+      },
+    }),
+    prisma.shopifyVariantMapping.findMany({
+      select: {
+        shopifyVariantGid: true,
+        sellableSkuId: true,
+        sellableSku: { select: { sku: true, name: true } },
+      },
+    }),
+  ]);
+
+  const mappingByVariantGid = new Map(
+    mappings.map((m) => [m.shopifyVariantGid, m]),
+  );
+
+  return variants.map((v) => {
+    const mapping = mappingByVariantGid.get(v.shopifyVariantGid);
+    return {
+      shopifyVariantGid: v.shopifyVariantGid,
+      shopifyProductGid: v.shopifyProductGid,
+      productTitle: v.product.title,
+      variantTitle: v.title,
+      sku: v.sku,
+      price: v.price,
+      mappedSkuId: mapping?.sellableSkuId ?? null,
+      mappedSkuCode: mapping?.sellableSku.sku ?? null,
+      mappedSkuName: mapping?.sellableSku.name ?? null,
+    };
+  });
 }
 
 // ─── Order sync ───────────────────────────────────────────────────────────────

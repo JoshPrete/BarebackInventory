@@ -1,4 +1,5 @@
 import { getShopifyConfig } from "./config";
+import { getAccessToken } from "./auth";
 
 export type ShopifyGraphqlResponse<T> = {
   data?: T;
@@ -8,6 +9,9 @@ export type ShopifyGraphqlResponse<T> = {
 /**
  * Shopify Admin GraphQL API (recommended for new integrations).
  * @see https://shopify.dev/docs/api/admin-graphql
+ *
+ * Auth: client-credentials token obtained via getAccessToken() — cached in
+ * memory until near expiry, then refreshed transparently.
  */
 export async function shopifyAdminGraphql<T>(
   query: string,
@@ -15,15 +19,19 @@ export async function shopifyAdminGraphql<T>(
 ): Promise<ShopifyGraphqlResponse<T>> {
   const cfg = getShopifyConfig();
   if (!cfg) {
-    throw new Error("Shopify is not configured (set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_ACCESS_TOKEN).");
+    throw new Error(
+      "Shopify is not configured (set SHOPIFY_SHOP, SHOPIFY_CLIENT_ID, and SHOPIFY_CLIENT_SECRET).",
+    );
   }
 
+  const accessToken = await getAccessToken(cfg);
   const url = `https://${cfg.shopDomain}/admin/api/${cfg.apiVersion}/graphql.json`;
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Shopify-Access-Token": cfg.adminAccessToken,
+      "X-Shopify-Access-Token": accessToken,
     },
     body: JSON.stringify({ query, variables }),
   });
