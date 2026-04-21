@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const APP_NAV = [
-  { href: "/", label: "Home" },
+  { href: "/dashboard", label: "Home" },
   { href: "/components", label: "Raw & Packaging" },
   { href: "/skus", label: "SKUs" },
   { href: "/mappings", label: "SKU mappings" },
