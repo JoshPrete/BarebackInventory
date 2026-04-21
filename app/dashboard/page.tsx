@@ -379,6 +379,11 @@ export default async function DashboardPage({
       title="Today's overview"
       description="What to order, what's at risk, and what you can produce."
     >
+      {/* ── DEPLOYMENT MARKER — remove after confirming deploy ── */}
+      <div className="mb-6 rounded-lg border-2 border-yellow-400 bg-yellow-50 px-4 py-3 text-center">
+        <p className="text-sm font-bold text-yellow-900">DASHBOARD VERSION TEST</p>
+        <p className="text-xs text-yellow-700">Deployed: 2026-04-21 — commit 55847fe</p>
+      </div>
       <div className="space-y-8">
 
         {/* ── Status counts ────────────────────────────────────────────────── */}
