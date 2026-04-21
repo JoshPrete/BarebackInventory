@@ -272,6 +272,34 @@ function FilterLink({ label, value, active }: { label: string; value: FilterValu
   );
 }
 
+// ─── Run-out display helper ───────────────────────────────────────────────────
+
+function runOutLabel(daysRemaining: number | null): {
+  text: string;
+  sub: string | null;
+  color: string;
+} {
+  if (daysRemaining === null) {
+    return { text: "No usage data", sub: null, color: "text-zinc-400" };
+  }
+  if (daysRemaining <= 0) {
+    return { text: "Out of stock", sub: null, color: "text-red-600" };
+  }
+  const days = Math.floor(daysRemaining);
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const dayName = date.toLocaleDateString("en-AU", { weekday: "long" });
+
+  if (days === 0) {
+    return { text: "Runs out today", sub: dayName, color: "text-red-600" };
+  }
+  if (days === 1) {
+    return { text: "Runs out tomorrow", sub: dayName, color: "text-red-500" };
+  }
+  const color = days <= 3 ? "text-red-500" : days <= LEAD_TIME_DAYS ? "text-amber-600" : "text-zinc-500";
+  return { text: `Runs out in ${days} days`, sub: dayName, color };
+}
+
 // ─── Order Today panel ────────────────────────────────────────────────────────
 // Primary decision element. Full-width, prominent. Answers:
 // "What do I need to order today to avoid stockouts?"
@@ -279,23 +307,28 @@ function FilterLink({ label, value, active }: { label: string; value: FilterValu
 function OrderTodayPanel({ ingredients }: { ingredients: IngredientRow[] }) {
   const toOrder = ingredients
     .filter((c) => c.needsOrder)
-    .sort((a, b) => {
-      // Sort by urgency: soonest stockout first; no-usage-data items last.
-      const da = a.daysRemaining ?? 999;
-      const db = b.daysRemaining ?? 999;
-      return da - db;
-    });
+    .sort((a, b) => (a.daysRemaining ?? 999) - (b.daysRemaining ?? 999));
 
   if (toOrder.length === 0) {
+    // Find the minimum daysRemaining across ingredients that have usage data.
+    const minDays = ingredients
+      .filter((c) => c.daysRemaining !== null)
+      .reduce<number | null>((min, c) => {
+        const d = Math.floor(c.daysRemaining!);
+        return min === null || d < min ? d : min;
+      }, null);
+
     return (
       <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-6 py-5">
         <div className="flex items-center gap-3">
           <span className="text-2xl">✅</span>
           <div>
-            <p className="font-semibold text-emerald-800">All ingredients healthy</p>
-            <p className="text-sm text-emerald-700">
-              No orders needed today based on a {USAGE_DAYS}-day burn rate and {LEAD_TIME_DAYS}-day lead time.
+            <p className="font-semibold text-emerald-800">
+              {minDays !== null
+                ? `You're fully stocked for the next ${minDays} days`
+                : "You're fully stocked"}
             </p>
+            <p className="text-sm text-emerald-700">No orders needed today.</p>
           </div>
         </div>
       </div>
@@ -305,13 +338,12 @@ function OrderTodayPanel({ ingredients }: { ingredients: IngredientRow[] }) {
   return (
     <div className="rounded-xl border-2 border-red-300 bg-white shadow-md">
       {/* Header */}
-      <div className="flex items-center gap-3 border-b border-red-100 bg-red-50 px-6 py-4 rounded-t-xl">
+      <div className="flex items-center gap-3 rounded-t-xl border-b border-red-100 bg-red-50 px-6 py-4">
         <span className="text-2xl">🔥</span>
         <div>
           <h2 className="text-base font-bold text-red-900">Order today</h2>
           <p className="text-xs text-red-700">
             {toOrder.length} ingredient{toOrder.length !== 1 ? "s" : ""} will run out before your next delivery arrives
-            ({LEAD_TIME_DAYS}-day lead time · {USAGE_DAYS}-day burn rate)
           </p>
         </div>
         <Link
@@ -322,63 +354,45 @@ function OrderTodayPanel({ ingredients }: { ingredients: IngredientRow[] }) {
         </Link>
       </div>
 
-      {/* Detail table */}
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[640px] text-left text-sm">
-          <thead className="border-b border-zinc-100 bg-zinc-50 text-xs font-medium uppercase tracking-wide text-zinc-500">
-            <tr>
-              <th className="px-5 py-3">Ingredient</th>
-              <th className="px-5 py-3 text-right">In stock</th>
-              <th className="px-5 py-3 text-right">Daily usage</th>
-              <th className="px-5 py-3 text-right">Days left</th>
-              <th className="px-5 py-3 text-right">Lead time</th>
-              <th className="px-5 py-3 text-right font-bold text-zinc-700">Order qty</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-100">
-            {toOrder.map((c) => (
-              <tr key={c.id} className="hover:bg-zinc-50/60">
-                <td className="px-5 py-3 font-medium text-zinc-900">{c.name}</td>
-                <td className={`px-5 py-3 text-right tabular-nums ${c.onHand <= 0 ? "font-bold text-red-600" : "text-zinc-700"}`}>
-                  {c.onHand.toFixed(1)} {c.unit}
-                </td>
-                <td className="px-5 py-3 text-right tabular-nums text-zinc-600">
-                  {c.dailyUsage > 0 ? `${c.dailyUsage.toFixed(1)} ${c.unit}/day` : <span className="text-zinc-400">No data</span>}
-                </td>
-                <td className={`px-5 py-3 text-right tabular-nums font-semibold ${
-                  c.daysRemaining === null ? "text-zinc-400"
-                  : c.daysRemaining <= 0 ? "text-red-600"
-                  : c.daysRemaining <= 3 ? "text-red-500"
-                  : "text-amber-600"
-                }`}>
-                  {c.daysRemaining === null
-                    ? "Unknown"
-                    : c.daysRemaining <= 0
-                      ? "Out now"
-                      : `${c.daysRemaining.toFixed(1)} days`}
-                </td>
-                <td className="px-5 py-3 text-right tabular-nums text-zinc-500">
-                  {c.leadTimeDays} days
-                </td>
-                <td className="px-5 py-3 text-right">
-                  <span className="font-bold text-zinc-900">
-                    {c.recommendedOrderQty > 0
-                      ? `${c.recommendedOrderQty} ${c.unit}`
-                      : <span className="text-zinc-400">—</span>}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* Rows */}
+      <ul className="divide-y divide-zinc-100">
+        {toOrder.map((c) => {
+          const label = runOutLabel(c.daysRemaining);
+          return (
+            <li key={c.id} className="flex items-center gap-4 px-6 py-4 hover:bg-zinc-50/60">
+              {/* Left: name + stock */}
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-zinc-900">{c.name}</p>
+                <p className="text-sm text-zinc-500">
+                  {c.onHand <= 0
+                    ? <span className="font-medium text-red-600">None in stock</span>
+                    : <>{c.onHand.toFixed(1)} {c.unit} in stock</>}
+                </p>
+              </div>
 
-      {/* MOQ note */}
-      {toOrder.some((c) => c.moq > 0) && (
-        <p className="border-t border-zinc-100 px-5 py-2 text-xs text-zinc-400">
-          * MOQ applied where configured. Order qty = max(MOQ, dailyUsage × (lead time + {BUFFER_DAYS}-day buffer).
-        </p>
-      )}
+              {/* Middle: run-out warning */}
+              <div className="hidden shrink-0 text-right sm:block">
+                <p className={`text-sm font-semibold ${label.color}`}>{label.text}</p>
+                {label.sub && <p className="text-xs text-zinc-400">{label.sub}</p>}
+              </div>
+
+              {/* Right: order quantity */}
+              <div className="shrink-0 text-right">
+                {c.recommendedOrderQty > 0 ? (
+                  <>
+                    <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">Order</p>
+                    <p className="text-lg font-bold text-zinc-900">
+                      {c.recommendedOrderQty} {c.unit}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-sm text-zinc-400">—</p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
