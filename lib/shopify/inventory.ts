@@ -24,7 +24,7 @@ const GET_LOCATIONS_QUERY = `
   query GetFirstLocation {
     locations(first: 1) {
       edges {
-        node { id name }
+        node { id }
       }
     }
   }
@@ -59,7 +59,7 @@ const ADJUST_INVENTORY_MUTATION = `
 
 interface LocationsResponse {
   locations: {
-    edges: { node: { id: string; name: string } }[];
+    edges: { node: { id: string } }[];
   };
 }
 
