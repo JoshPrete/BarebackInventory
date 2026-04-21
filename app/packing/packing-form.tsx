@@ -83,6 +83,11 @@ export function PackingForm({ skus }: { skus: SkuOption[] }) {
             {state.success}
           </p>
         ) : null}
+        {state.shopifyWarning ? (
+          <p className="text-sm text-amber-700 rounded border border-amber-300 bg-amber-50 px-3 py-2" role="alert">
+            <strong>Shopify not updated:</strong> {state.shopifyWarning} Update Shopify inventory manually for this run.
+          </p>
+        ) : null}
         <button
           type="submit"
           disabled={pending}
