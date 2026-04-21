@@ -95,13 +95,15 @@ async function fetchAllProducts(): Promise<ShopifyProductRecord[]> {
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
+// Fetch the 10 most recent orders (by processed_at desc).
+// The `query` variable narrows by created_at when a `since` filter is passed.
 const ORDERS_QUERY = `
   query GetOrders($query: String) {
-    orders(first: 250, query: $query) {
+    orders(first: 10, sortKey: PROCESSED_AT, reverse: true, query: $query) {
       edges {
         node {
           id
-          orderNumber
+          name
           createdAt
           displayFinancialStatus
           lineItems(first: 100) {
@@ -123,7 +125,8 @@ const ORDERS_QUERY = `
 
 interface GqlOrderNode {
   id: string;
-  orderNumber: number;
+  /** Display name e.g. "#1001" — orderNumber field is not available to all app types. */
+  name: string;
   createdAt: string;
   displayFinancialStatus: string;
   lineItems: {
@@ -152,7 +155,8 @@ async function fetchAllOrders(sinceIso?: string): Promise<ShopifyOrderRecord[]> 
 
   return (res.data?.orders.edges ?? []).map(({ node: o }): ShopifyOrderRecord => ({
     shopifyOrderGid: o.id,
-    orderNumber: o.orderNumber,
+    // Parse "#1001" → 1001; fall back to 0 if format differs.
+    orderNumber: parseInt(o.name.replace(/\D/g, ""), 10) || 0,
     createdAt: o.createdAt,
     financialStatus: o.displayFinancialStatus,
     lineItems: o.lineItems.edges.map(({ node: li }) => ({

@@ -31,6 +31,19 @@ interface ProductsProbeResponse {
  * Never returns the access token itself.
  */
 export async function GET() {
+  try {
+    return await handler();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[shopify/health] Unhandled error:", err);
+    return NextResponse.json(
+      { configured: false, shop: null, authSucceeded: false, productsReachable: false, productTitles: [], errors: [`Unhandled error: ${msg}`] },
+      { status: 500 },
+    );
+  }
+}
+
+async function handler() {
   const cfg = getShopifyConfig();
 
   if (!cfg) {

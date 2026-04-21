@@ -145,12 +145,14 @@ export async function getVariantMappingQueue(): Promise<VariantMappingRow[]> {
 // ─── Order sync ───────────────────────────────────────────────────────────────
 
 export interface SyncOrdersResult {
+  ordersFetched: number;
   ordersImported: number;
   ordersSkipped: number; // already in ledger
   lineItemsImported: number;
   lineItemsSkipped: number; // no ShopifyVariantMapping for this variant
   deductionWarnings: number;    // lines where packed stock was missing or insufficient
   componentWarnings: number;    // BOM / component stock warnings across all lines
+  errors: string[];
 }
 
 /**
@@ -169,14 +171,19 @@ export async function syncShopifyOrders(
   const adapter = getAdapter();
   const orders = await adapter.fetchOrders(sinceIso);
 
+  console.log(`[shopify/orders] Fetched ${orders.length} order(s) from Shopify${sinceIso ? ` since ${sinceIso}` : ""}`);
+
   let ordersImported = 0;
   let ordersSkipped = 0;
   let lineItemsImported = 0;
   let lineItemsSkipped = 0;
   let deductionWarnings = 0;
   let componentWarnings = 0;
+  const errors: string[] = [];
 
   for (const order of orders) {
+    console.log(`[shopify/orders] Processing order ${order.shopifyOrderGid} (${order.orderNumber ? `#${order.orderNumber}` : "no number"})`);
+
     // Dedup check: has this Shopify order GID already been imported?
     const existing = await prisma.manualSale.findFirst({
       where: { orderRef: order.shopifyOrderGid },
@@ -184,17 +191,27 @@ export async function syncShopifyOrders(
     });
 
     if (existing) {
+      console.log(`[shopify/orders] Skipping ${order.shopifyOrderGid} — already imported`);
       ordersSkipped++;
       continue;
     }
 
-    const result = await recordShopifyOrder(order);
-    ordersImported++;
-    lineItemsImported += result.linesImported;
-    lineItemsSkipped += result.linesSkipped;
-    deductionWarnings += result.deductionWarnings;
-    componentWarnings += result.componentWarnings;
+    try {
+      const result = await recordShopifyOrder(order);
+      ordersImported++;
+      lineItemsImported += result.linesImported;
+      lineItemsSkipped += result.linesSkipped;
+      deductionWarnings += result.deductionWarnings;
+      componentWarnings += result.componentWarnings;
+      console.log(`[shopify/orders] Imported ${order.shopifyOrderGid} — lines: ${result.linesImported} imported, ${result.linesSkipped} skipped, ${result.deductionWarnings} deduction warnings`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[shopify/orders] Failed to import order ${order.shopifyOrderGid}:`, err);
+      errors.push(`Order ${order.shopifyOrderGid}: ${msg}`);
+    }
   }
 
-  return { ordersImported, ordersSkipped, lineItemsImported, lineItemsSkipped, deductionWarnings, componentWarnings };
+  console.log(`[shopify/orders] Done — imported: ${ordersImported}, skipped: ${ordersSkipped}, errors: ${errors.length}`);
+
+  return { ordersFetched: orders.length, ordersImported, ordersSkipped, lineItemsImported, lineItemsSkipped, deductionWarnings, componentWarnings, errors };
 }
