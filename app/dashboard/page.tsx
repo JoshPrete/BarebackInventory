@@ -1,5 +1,7 @@
 import { PageShell } from "@/app/_components/page-shell";
 import { prisma } from "@/lib/prisma";
+import { shopifyAdminGraphql } from "@/lib/shopify/admin";
+import { isShopifyConfigured } from "@/lib/shopify/config";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -138,6 +140,55 @@ async function getIngredientPlanning() {
 
     return { ...c, onHand, dailyUsage, daysRemaining, required, orderQty };
   });
+}
+
+// ─── Data: Shopify live inventory ────────────────────────────────────────────
+// Fetches inventoryQuantity per ProductVariant from Shopify and maps back to
+// internal sellableSkuId. Returns an empty map if Shopify is not configured
+// or the query fails — callers fall back to the internal ledger in that case.
+
+const INVENTORY_QUERY = `
+  query GetVariantInventory($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on ProductVariant {
+        id
+        inventoryQuantity
+      }
+    }
+  }
+`;
+
+type InventoryNode = { id: string; inventoryQuantity: number };
+type InventoryResponse = { nodes: Array<InventoryNode | null> };
+
+async function getShopifyInventory(): Promise<Map<string, number>> {
+  if (!isShopifyConfigured()) return new Map();
+
+  const mappings = await prisma.shopifyVariantMapping.findMany({
+    select: { sellableSkuId: true, shopifyVariantGid: true },
+  });
+  if (mappings.length === 0) return new Map();
+
+  try {
+    const res = await shopifyAdminGraphql<InventoryResponse>(INVENTORY_QUERY, {
+      ids: mappings.map((m) => m.shopifyVariantGid),
+    });
+
+    const qtyByVariantGid = new Map(
+      (res.data?.nodes ?? [])
+        .filter((n): n is InventoryNode => n !== null && "inventoryQuantity" in n)
+        .map((n) => [n.id, n.inventoryQuantity ?? 0]),
+    );
+
+    return new Map(
+      mappings
+        .filter((m) => qtyByVariantGid.has(m.shopifyVariantGid))
+        .map((m) => [m.sellableSkuId, qtyByVariantGid.get(m.shopifyVariantGid)!]),
+    );
+  } catch (err) {
+    console.warn("[dashboard] Shopify inventory fetch failed — falling back to internal ledger:", err);
+    return new Map();
+  }
 }
 
 type Row = Awaited<ReturnType<typeof getDashboardRows>>[number];
@@ -359,10 +410,29 @@ export default async function DashboardPage({
   const validFilters: FilterValue[] = ["all", "ready", "low", "out"];
   const activeFilter: FilterValue = validFilters.includes(filter) ? filter : "all";
 
-  const [allRows, ingredients] = await Promise.all([
+  const [allRowsRaw, ingredients, shopifyInventory] = await Promise.all([
     getDashboardRows(),
     getIngredientPlanning(),
+    getShopifyInventory(),
   ]);
+
+  // Override packedOnHand with live Shopify inventory where a mapping exists.
+  // Recomputes status and totalPotential to stay consistent.
+  const allRows = allRowsRaw.map((row) => {
+    if (!shopifyInventory.has(row.id)) return row;
+    const packedOnHand = shopifyInventory.get(row.id)!;
+    const totalPotential =
+      row.availableFromComponents !== null
+        ? packedOnHand + row.availableFromComponents
+        : packedOnHand;
+    const status: Row["status"] =
+      packedOnHand <= 0
+        ? "OUT"
+        : packedOnHand < PACKED_LOW_THRESHOLD
+          ? "LOW"
+          : "READY";
+    return { ...row, packedOnHand, totalPotential, status };
+  });
 
   const ready = allRows.filter((r) => r.status === "READY").length;
   const low   = allRows.filter((r) => r.status === "LOW").length;
