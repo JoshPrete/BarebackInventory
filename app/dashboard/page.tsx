@@ -6,10 +6,14 @@ import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const PACKED_LOW_THRESHOLD = 5;
 const TARGET_STOCK = 20;
-const PLANNING_DAYS = 7;       // horizon for "order today" calculation
-const USAGE_WINDOW_DAYS = 30;  // rolling window for daily-usage estimate
+const USAGE_DAYS = 14;       // rolling window for burn-rate calculation
+const LEAD_TIME_DAYS = 7;    // default supplier lead time (days)
+const BUFFER_DAYS = 3;       // safety buffer added to reorder quantity
+const DEFAULT_MOQ = 0;       // minimum order quantity (no minimum by default)
 
 // ─── Data: SKU rows (unchanged) ───────────────────────────────────────────────
 
@@ -75,11 +79,9 @@ async function getDashboardRows() {
         : packedOnHand;
 
     const status: "READY" | "LOW" | "OUT" =
-      packedOnHand <= 0
-        ? "OUT"
-        : packedOnHand < PACKED_LOW_THRESHOLD
-          ? "LOW"
-          : "READY";
+      packedOnHand <= 0 ? "OUT"
+      : packedOnHand < PACKED_LOW_THRESHOLD ? "LOW"
+      : "READY";
 
     return {
       id: sku.id,
@@ -95,57 +97,89 @@ async function getDashboardRows() {
 }
 
 // ─── Data: ingredient planning ────────────────────────────────────────────────
-// Computes daily usage (rolling 30-day average from SALE movements) and
-// projects forward PLANNING_DAYS days to derive order quantities.
+// Burn rate = sum(skuUnitsSold × qtyPerUnit) / USAGE_DAYS, derived from
+// ManualSaleLine (Shopify-imported orders) and BOM component rules.
+// No schema changes — all queries use existing tables.
 
 async function getIngredientPlanning() {
   const windowStart = new Date();
-  windowStart.setDate(windowStart.getDate() - USAGE_WINDOW_DAYS);
+  windowStart.setDate(windowStart.getDate() - USAGE_DAYS);
 
-  const [ingredients, currentSums, saleSums] = await Promise.all([
+  const [ingredients, currentSums, recentSaleLines, bomRules] = await Promise.all([
     prisma.component.findMany({
       select: { id: true, name: true, unit: true, reorderPoint: true },
       orderBy: { name: "asc" },
     }),
-    // Total on-hand (all movement types).
+    // Current on-hand: sum of all stock movements per ingredient.
     prisma.stockMovement.groupBy({
       by: ["componentId"],
       _sum: { qtyChange: true },
     }),
-    // Usage over the past USAGE_WINDOW_DAYS days (SALE movements are negative qtyChange).
-    prisma.stockMovement.groupBy({
-      by: ["componentId"],
-      where: { type: "SALE", createdAt: { gte: windowStart } },
-      _sum: { qtyChange: true },
+    // Recent Shopify-imported sale lines within the usage window.
+    prisma.manualSaleLine.findMany({
+      where: { manualSale: { createdAt: { gte: windowStart } } },
+      select: { sellableSkuId: true, quantity: true },
+    }),
+    // BOM: ingredient qty consumed per sellable unit.
+    prisma.sKUComponentRule.findMany({
+      select: { skuId: true, componentId: true, qtyPerUnit: true },
     }),
   ]);
 
+  // Total units sold per SKU in the window.
+  const skuSoldQty = new Map<string, number>();
+  for (const line of recentSaleLines) {
+    skuSoldQty.set(line.sellableSkuId, (skuSoldQty.get(line.sellableSkuId) ?? 0) + line.quantity);
+  }
+
+  // Ingredient daily burn rate: sum(skuSales × qtyPerUnit) / USAGE_DAYS.
+  const dailyUsageByComponentId = new Map<string, number>();
+  for (const rule of bomRules) {
+    const sold = skuSoldQty.get(rule.skuId) ?? 0;
+    const contribution = (sold * rule.qtyPerUnit) / USAGE_DAYS;
+    dailyUsageByComponentId.set(
+      rule.componentId,
+      (dailyUsageByComponentId.get(rule.componentId) ?? 0) + contribution,
+    );
+  }
+
   const onHandById = new Map(currentSums.map((s) => [s.componentId, s._sum.qtyChange ?? 0]));
-  // SALE qtyChange is negative — abs gives units consumed.
-  const usedById = new Map(saleSums.map((s) => [s.componentId, Math.abs(s._sum.qtyChange ?? 0)]));
 
   return ingredients.map((c) => {
     const onHand = onHandById.get(c.id) ?? 0;
-    const totalUsed = usedById.get(c.id) ?? 0;
-    const dailyUsage = totalUsed / USAGE_WINDOW_DAYS;
+    const dailyUsage = dailyUsageByComponentId.get(c.id) ?? 0;
 
-    // Days remaining before stockout (null = no usage history → can't estimate).
-    const daysRemaining =
-      dailyUsage > 0 ? Math.floor(onHand / dailyUsage) : null;
+    // Days remaining: null when there is no usage data (can't extrapolate).
+    const daysRemaining = dailyUsage > 0 ? onHand / dailyUsage : null;
 
-    // How much is needed for the next PLANNING_DAYS days.
-    const required = dailyUsage * PLANNING_DAYS;
-    // Order quantity = gap between what's needed and what's on hand.
-    const orderQty = Math.max(0, Math.ceil(required - onHand));
+    // Needs ordering if: within lead time window, OR physically out of stock.
+    const needsOrder =
+      (daysRemaining !== null && daysRemaining <= LEAD_TIME_DAYS) ||
+      (onHand <= 0 && c.reorderPoint > 0);
 
-    return { ...c, onHand, dailyUsage, daysRemaining, required, orderQty };
+    // Recommended qty covers lead time + buffer days at current burn rate.
+    // Falls back to reorderPoint when there is no usage history.
+    const recommendedOrderQty =
+      dailyUsage > 0
+        ? Math.max(DEFAULT_MOQ, Math.ceil(dailyUsage * (LEAD_TIME_DAYS + BUFFER_DAYS)))
+        : c.reorderPoint > 0
+          ? c.reorderPoint
+          : 0;
+
+    return {
+      ...c,
+      onHand,
+      dailyUsage,
+      daysRemaining,
+      needsOrder,
+      recommendedOrderQty,
+      leadTimeDays: LEAD_TIME_DAYS,
+      moq: DEFAULT_MOQ,
+    };
   });
 }
 
-// ─── Data: Shopify live inventory ────────────────────────────────────────────
-// Fetches inventoryQuantity per ProductVariant from Shopify and maps back to
-// internal sellableSkuId. Returns an empty map if Shopify is not configured
-// or the query fails — callers fall back to the internal ledger in that case.
+// ─── Data: Shopify live inventory (unchanged) ─────────────────────────────────
 
 const INVENTORY_QUERY = `
   query GetVariantInventory($ids: [ID!]!) {
@@ -191,6 +225,8 @@ async function getShopifyInventory(): Promise<Map<string, number>> {
   }
 }
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 type Row = Awaited<ReturnType<typeof getDashboardRows>>[number];
 type IngredientRow = Awaited<ReturnType<typeof getIngredientPlanning>>[number];
 type FilterValue = "all" | "ready" | "low" | "out";
@@ -216,7 +252,7 @@ function computeAction(packed: number, fromComponents: number | null): string {
   if (packed === 0 && fromComponents !== null && fromComponents > 0)
     return `Pack ${fromComponents} units`;
   if (packed < TARGET_STOCK && fromComponents !== null && fromComponents > 0)
-    return `Pack ${TARGET_STOCK - packed} more (up to ${fromComponents} available)`;
+    return `Pack ${TARGET_STOCK - packed} more (up to ${fromComponents})`;
   if (packed === 0 && (fromComponents === null || fromComponents === 0))
     return "Restock ingredients";
   return "No action needed";
@@ -236,122 +272,124 @@ function FilterLink({ label, value, active }: { label: string; value: FilterValu
   );
 }
 
-// ─── Card A: Critical risk ────────────────────────────────────────────────────
-// Ingredients likely to run out within PLANNING_DAYS days.
+// ─── Order Today panel ────────────────────────────────────────────────────────
+// Primary decision element. Full-width, prominent. Answers:
+// "What do I need to order today to avoid stockouts?"
 
-function CardCriticalRisk({ ingredients }: { ingredients: IngredientRow[] }) {
-  const critical = ingredients
-    .filter((c) => c.daysRemaining !== null && c.daysRemaining < PLANNING_DAYS)
-    .sort((a, b) => (a.daysRemaining ?? 999) - (b.daysRemaining ?? 999))
-    .slice(0, 3);
-
-  // Also flag anything already at or below zero with no usage history.
-  const outNoHistory = ingredients
-    .filter((c) => c.onHand <= 0 && c.daysRemaining === null)
-    .slice(0, 3 - critical.length);
-
-  const all = [...critical, ...outNoHistory];
-  const hasRisk = all.length > 0;
-
-  return (
-    <div className={`flex flex-col rounded-xl border p-5 shadow-sm ${hasRisk ? "border-red-200 bg-red-50" : "border-zinc-200 bg-white"}`}>
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-lg">{hasRisk ? "🔴" : "🟢"}</span>
-        <h2 className="text-sm font-semibold text-zinc-800">Critical risk</h2>
-      </div>
-
-      <div className="grow">
-        {hasRisk ? (
-          <ul className="space-y-2.5">
-            {all.map((c) => (
-              <li key={c.id} className="flex items-start justify-between gap-3">
-                <span className="truncate text-sm font-medium text-zinc-900">{c.name}</span>
-                <span className="shrink-0 text-right text-xs font-semibold text-red-700">
-                  {c.daysRemaining !== null
-                    ? c.daysRemaining <= 0
-                      ? "Out now"
-                      : `${c.daysRemaining}d left`
-                    : "Out — no history"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-emerald-700">✅ All ingredients are in a safe range</p>
-        )}
-      </div>
-
-      <Link
-        href="/stock"
-        className="mt-4 inline-block rounded-lg border border-zinc-300 bg-white px-4 py-2 text-center text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50"
-      >
-        Review ingredient stock
-      </Link>
-    </div>
-  );
-}
-
-// ─── Card B: Order today ──────────────────────────────────────────────────────
-// Top ingredients to order based on 7-day projected shortfall.
-
-function CardOrderToday({ ingredients }: { ingredients: IngredientRow[] }) {
+function OrderTodayPanel({ ingredients }: { ingredients: IngredientRow[] }) {
   const toOrder = ingredients
-    .filter((c) => c.orderQty > 0)
-    .sort((a, b) => b.orderQty - a.orderQty)
-    .slice(0, 3);
+    .filter((c) => c.needsOrder)
+    .sort((a, b) => {
+      // Sort by urgency: soonest stockout first; no-usage-data items last.
+      const da = a.daysRemaining ?? 999;
+      const db = b.daysRemaining ?? 999;
+      return da - db;
+    });
 
-  const hasOrders = toOrder.length > 0;
+  if (toOrder.length === 0) {
+    return (
+      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-6 py-5">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl">✅</span>
+          <div>
+            <p className="font-semibold text-emerald-800">All ingredients healthy</p>
+            <p className="text-sm text-emerald-700">
+              No orders needed today based on a {USAGE_DAYS}-day burn rate and {LEAD_TIME_DAYS}-day lead time.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className={`flex flex-col rounded-xl border p-5 shadow-sm ${hasOrders ? "border-amber-200 bg-amber-50" : "border-zinc-200 bg-white"}`}>
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-lg">{hasOrders ? "🛒" : "🟢"}</span>
-        <h2 className="text-sm font-semibold text-zinc-800">Order today</h2>
-        {hasOrders && (
-          <span className="ml-auto text-xs text-zinc-500">next {PLANNING_DAYS} days</span>
-        )}
+    <div className="rounded-xl border-2 border-red-300 bg-white shadow-md">
+      {/* Header */}
+      <div className="flex items-center gap-3 border-b border-red-100 bg-red-50 px-6 py-4 rounded-t-xl">
+        <span className="text-2xl">🔥</span>
+        <div>
+          <h2 className="text-base font-bold text-red-900">Order today</h2>
+          <p className="text-xs text-red-700">
+            {toOrder.length} ingredient{toOrder.length !== 1 ? "s" : ""} will run out before your next delivery arrives
+            ({LEAD_TIME_DAYS}-day lead time · {USAGE_DAYS}-day burn rate)
+          </p>
+        </div>
+        <Link
+          href="/receipts"
+          className="ml-auto shrink-0 rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-red-800"
+        >
+          Record delivery
+        </Link>
       </div>
 
-      <div className="grow">
-        {hasOrders ? (
-          <ul className="space-y-3">
+      {/* Detail table */}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-left text-sm">
+          <thead className="border-b border-zinc-100 bg-zinc-50 text-xs font-medium uppercase tracking-wide text-zinc-500">
+            <tr>
+              <th className="px-5 py-3">Ingredient</th>
+              <th className="px-5 py-3 text-right">In stock</th>
+              <th className="px-5 py-3 text-right">Daily usage</th>
+              <th className="px-5 py-3 text-right">Days left</th>
+              <th className="px-5 py-3 text-right">Lead time</th>
+              <th className="px-5 py-3 text-right font-bold text-zinc-700">Order qty</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
             {toOrder.map((c) => (
-              <li key={c.id}>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="truncate text-sm font-medium text-zinc-900">{c.name}</span>
-                  <span className="shrink-0 text-xs text-zinc-500 tabular-nums">
-                    {c.onHand} {c.unit} on hand
+              <tr key={c.id} className="hover:bg-zinc-50/60">
+                <td className="px-5 py-3 font-medium text-zinc-900">{c.name}</td>
+                <td className={`px-5 py-3 text-right tabular-nums ${c.onHand <= 0 ? "font-bold text-red-600" : "text-zinc-700"}`}>
+                  {c.onHand.toFixed(1)} {c.unit}
+                </td>
+                <td className="px-5 py-3 text-right tabular-nums text-zinc-600">
+                  {c.dailyUsage > 0 ? `${c.dailyUsage.toFixed(1)} ${c.unit}/day` : <span className="text-zinc-400">No data</span>}
+                </td>
+                <td className={`px-5 py-3 text-right tabular-nums font-semibold ${
+                  c.daysRemaining === null ? "text-zinc-400"
+                  : c.daysRemaining <= 0 ? "text-red-600"
+                  : c.daysRemaining <= 3 ? "text-red-500"
+                  : "text-amber-600"
+                }`}>
+                  {c.daysRemaining === null
+                    ? "Unknown"
+                    : c.daysRemaining <= 0
+                      ? "Out now"
+                      : `${c.daysRemaining.toFixed(1)} days`}
+                </td>
+                <td className="px-5 py-3 text-right tabular-nums text-zinc-500">
+                  {c.leadTimeDays} days
+                </td>
+                <td className="px-5 py-3 text-right">
+                  <span className="font-bold text-zinc-900">
+                    {c.recommendedOrderQty > 0
+                      ? `${c.recommendedOrderQty} ${c.unit}`
+                      : <span className="text-zinc-400">—</span>}
                   </span>
-                </div>
-                <p className="mt-0.5 text-sm font-semibold text-amber-800">
-                  You need {c.orderQty} more {c.unit}
-                </p>
-              </li>
+                </td>
+              </tr>
             ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-emerald-700">✅ You have enough stock for the next {PLANNING_DAYS} days</p>
-        )}
+          </tbody>
+        </table>
       </div>
 
-      <Link
-        href="/receipts"
-        className="mt-4 inline-block rounded-lg bg-zinc-900 px-4 py-2 text-center text-xs font-semibold text-white transition-colors hover:bg-zinc-700"
-      >
-        Record a delivery
-      </Link>
+      {/* MOQ note */}
+      {toOrder.some((c) => c.moq > 0) && (
+        <p className="border-t border-zinc-100 px-5 py-2 text-xs text-zinc-400">
+          * MOQ applied where configured. Order qty = max(MOQ, dailyUsage × (lead time + {BUFFER_DAYS}-day buffer).
+        </p>
+      )}
     </div>
   );
 }
 
-// ─── Card C: Production capacity ──────────────────────────────────────────────
-// Passive view: how many units can be produced right now.
+// ─── Production capacity card ─────────────────────────────────────────────────
 
 function CardProductionCapacity({ rows }: { rows: Row[] }) {
   const packable = rows
     .filter((r) => r.availableFromComponents !== null && r.availableFromComponents > 0)
     .sort((a, b) => (b.availableFromComponents ?? 0) - (a.availableFromComponents ?? 0))
-    .slice(0, 3);
+    .slice(0, 4);
 
   const totalUnits = rows.reduce((sum, r) => sum + (r.availableFromComponents ?? 0), 0);
 
@@ -361,12 +399,11 @@ function CardProductionCapacity({ rows }: { rows: Row[] }) {
         <span className="text-lg">📦</span>
         <h2 className="text-sm font-semibold text-zinc-800">Production capacity</h2>
       </div>
-
       <div className="grow">
         {packable.length > 0 ? (
           <>
-            <p className="mb-2 text-sm text-zinc-600">
-              You can produce{" "}
+            <p className="mb-3 text-sm text-zinc-600">
+              You can make{" "}
               <span className="font-semibold text-zinc-900">{totalUnits} units</span>{" "}
               from current ingredients.
             </p>
@@ -382,17 +419,54 @@ function CardProductionCapacity({ rows }: { rows: Row[] }) {
             </ul>
           </>
         ) : (
-          <p className="text-sm text-zinc-500">
-            No products can be packed right now — order ingredients first.
-          </p>
+          <p className="text-sm text-zinc-500">No products can be packed — order ingredients first.</p>
         )}
       </div>
-
       <Link
         href="/packing"
         className="mt-4 inline-block rounded-lg border border-zinc-300 bg-white px-4 py-2 text-center text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50"
       >
         Start packing
+      </Link>
+    </div>
+  );
+}
+
+// ─── Finished stock card ──────────────────────────────────────────────────────
+
+function CardFinishedStock({ rows }: { rows: Row[] }) {
+  const out = rows.filter((r) => r.status === "OUT").slice(0, 4);
+  const low = rows.filter((r) => r.status === "LOW").slice(0, 4 - out.length);
+  const issues = [...out, ...low];
+  const hasIssues = issues.length > 0;
+
+  return (
+    <div className={`flex flex-col rounded-xl border p-5 shadow-sm ${hasIssues ? "border-amber-200 bg-amber-50" : "border-zinc-200 bg-white"}`}>
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-lg">{hasIssues ? (out.length > 0 ? "🔴" : "🟡") : "🟢"}</span>
+        <h2 className="text-sm font-semibold text-zinc-800">Finished stock</h2>
+      </div>
+      <div className="grow">
+        {hasIssues ? (
+          <ul className="space-y-2">
+            {issues.map((r) => (
+              <li key={r.id} className="flex items-center justify-between gap-3">
+                <span className="truncate text-sm font-medium text-zinc-900">{r.name}</span>
+                <span className={`shrink-0 text-sm font-semibold tabular-nums ${r.status === "OUT" ? "text-red-600" : "text-amber-700"}`}>
+                  {r.packedOnHand} in stock
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-emerald-700">✅ All products are in stock</p>
+        )}
+      </div>
+      <Link
+        href="/skus"
+        className="mt-4 inline-block rounded-lg border border-zinc-300 bg-white px-4 py-2 text-center text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50"
+      >
+        View all products
       </Link>
     </div>
   );
@@ -417,7 +491,6 @@ export default async function DashboardPage({
   ]);
 
   // Override packedOnHand with live Shopify inventory where a mapping exists.
-  // Recomputes status and totalPotential to stay consistent.
   const allRows = allRowsRaw.map((row) => {
     if (!shopifyInventory.has(row.id)) return row;
     const packedOnHand = shopifyInventory.get(row.id)!;
@@ -426,11 +499,9 @@ export default async function DashboardPage({
         ? packedOnHand + row.availableFromComponents
         : packedOnHand;
     const status: Row["status"] =
-      packedOnHand <= 0
-        ? "OUT"
-        : packedOnHand < PACKED_LOW_THRESHOLD
-          ? "LOW"
-          : "READY";
+      packedOnHand <= 0 ? "OUT"
+      : packedOnHand < PACKED_LOW_THRESHOLD ? "LOW"
+      : "READY";
     return { ...row, packedOnHand, totalPotential, status };
   });
 
@@ -447,20 +518,18 @@ export default async function DashboardPage({
     <PageShell
       active="/dashboard"
       title="Today's overview"
-      description="What to order, what's at risk, and what you can produce."
+      description="What ingredients to order, production capacity, and finished stock status."
     >
-      {/* ── DEPLOYMENT MARKER — remove after confirming deploy ── */}
-      <div className="mb-6 rounded-lg border-2 border-yellow-400 bg-yellow-50 px-4 py-3 text-center">
-        <p className="text-sm font-bold text-yellow-900">DASHBOARD VERSION TEST</p>
-        <p className="text-xs text-yellow-700">Deployed: 2026-04-21 — commit 55847fe</p>
-      </div>
       <div className="space-y-8">
+
+        {/* ── Order Today — primary decision panel ─────────────────────────── */}
+        <OrderTodayPanel ingredients={ingredients} />
 
         {/* ── Status counts ────────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-3">
           <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
             <p className="text-3xl font-bold tabular-nums text-emerald-700">{ready}</p>
-            <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-emerald-600">Ready to sell</p>
+            <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-emerald-600">In stock</p>
           </div>
           <div className={`rounded-xl border px-5 py-4 text-center ${low > 0 ? "border-amber-200 bg-amber-50" : "border-zinc-200 bg-zinc-50"}`}>
             <p className={`text-3xl font-bold tabular-nums ${low > 0 ? "text-amber-700" : "text-zinc-400"}`}>{low}</p>
@@ -472,10 +541,9 @@ export default async function DashboardPage({
           </div>
         </div>
 
-        {/* ── Action cards ─────────────────────────────────────────────────── */}
-        <div className="grid gap-4 lg:grid-cols-3">
-          <CardCriticalRisk ingredients={ingredients} />
-          <CardOrderToday ingredients={ingredients} />
+        {/* ── Secondary cards ───────────────────────────────────────────────── */}
+        <div className="grid gap-4 lg:grid-cols-2">
+          <CardFinishedStock rows={allRows} />
           <CardProductionCapacity rows={allRows} />
         </div>
 
@@ -506,7 +574,7 @@ export default async function DashboardPage({
                 <thead className="border-b border-zinc-200 bg-zinc-50 text-xs font-medium uppercase tracking-wide text-zinc-500">
                   <tr>
                     <th className="px-4 py-3">Product</th>
-                    <th className="px-4 py-3 text-right">Ready to sell</th>
+                    <th className="px-4 py-3 text-right">In stock</th>
                     <th className="px-4 py-3 text-right">Can make more</th>
                     <th className="px-4 py-3 text-right">Total available</th>
                     <th className="px-4 py-3">Status</th>
@@ -545,8 +613,7 @@ export default async function DashboardPage({
           )}
 
           <p className="text-xs text-zinc-400">
-            &ldquo;Can make more&rdquo; = additional units producible from current ingredient stock.
-            &ldquo;Days left&rdquo; estimates are based on a {USAGE_WINDOW_DAYS}-day rolling usage average.
+            &ldquo;In stock&rdquo; = live Shopify inventory. &ldquo;Can make more&rdquo; = additional units producible from current ingredients. Burn rate based on last {USAGE_DAYS} days of sales.
           </p>
         </div>
 
