@@ -15,6 +15,7 @@ export const APP_NAV = [
   { href: "/adjustments", label: "Adjustments" },
   { href: "/integrations", label: "Integrations" },
   { href: "/warnings", label: "Warnings" },
+  { href: "/how-it-works", label: "How it works" },
 ] as const;
 
 export function AppNav({ active }: { active: string }) {
