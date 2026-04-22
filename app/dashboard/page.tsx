@@ -1,5 +1,7 @@
 import { PageShell } from "@/app/_components/page-shell";
 import { prisma } from "@/lib/prisma";
+import { shopifyAdminGraphql } from "@/lib/shopify/admin";
+import { isShopifyConfigured } from "@/lib/shopify/config";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -177,6 +179,54 @@ async function getIngredientPlanning() {
   });
 }
 
+
+// ─── Data: Shopify finished stock (source of truth for "in stock" counts) ────
+// Reads live inventoryQuantity from Shopify for SKUs with a variant mapping.
+// Used only for the finished-goods display — production history and ingredient
+// deductions always come from the internal ledger.
+
+const SHOPIFY_INVENTORY_QUERY = `
+  query GetVariantInventory($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on ProductVariant {
+        id
+        inventoryQuantity
+      }
+    }
+  }
+`;
+
+type InventoryNode = { id: string; inventoryQuantity: number };
+type InventoryResponse = { nodes: Array<InventoryNode | null> };
+
+/** Returns sellableSkuId → Shopify inventoryQuantity. Empty map on failure. */
+async function getShopifyFinishedStock(): Promise<Map<string, number>> {
+  if (!isShopifyConfigured()) return new Map();
+
+  const mappings = await prisma.shopifyVariantMapping.findMany({
+    select: { sellableSkuId: true, shopifyVariantGid: true },
+  });
+  if (mappings.length === 0) return new Map();
+
+  try {
+    const res = await shopifyAdminGraphql<InventoryResponse>(SHOPIFY_INVENTORY_QUERY, {
+      ids: mappings.map((m) => m.shopifyVariantGid),
+    });
+    const qtyByVariantGid = new Map(
+      (res.data?.nodes ?? [])
+        .filter((n): n is InventoryNode => n !== null && "inventoryQuantity" in n)
+        .map((n) => [n.id, n.inventoryQuantity ?? 0]),
+    );
+    return new Map(
+      mappings
+        .filter((m) => qtyByVariantGid.has(m.shopifyVariantGid))
+        .map((m) => [m.sellableSkuId, qtyByVariantGid.get(m.shopifyVariantGid)!]),
+    );
+  } catch (err) {
+    console.warn("[dashboard] Shopify inventory fetch failed:", err);
+    return new Map();
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -401,9 +451,11 @@ function CardProductionCapacity({ rows }: { rows: Row[] }) {
 
 // ─── Finished stock card ──────────────────────────────────────────────────────
 
-function CardFinishedStock({ rows }: { rows: Row[] }) {
-  const out = rows.filter((r) => r.status === "OUT").slice(0, 4);
-  const low = rows.filter((r) => r.status === "LOW").slice(0, 4 - out.length);
+type AugmentedRow = Row & { shopifyQty: number | null; displayQty: number; displayStatus: Row["status"] };
+
+function CardFinishedStock({ rows }: { rows: AugmentedRow[] }) {
+  const out = rows.filter((r) => r.displayStatus === "OUT").slice(0, 4);
+  const low = rows.filter((r) => r.displayStatus === "LOW").slice(0, 4 - out.length);
   const issues = [...out, ...low];
   const hasIssues = issues.length > 0;
 
@@ -412,6 +464,7 @@ function CardFinishedStock({ rows }: { rows: Row[] }) {
       <div className="mb-3 flex items-center gap-2">
         <span className="text-lg">{hasIssues ? (out.length > 0 ? "🔴" : "🟡") : "🟢"}</span>
         <h2 className="text-sm font-semibold text-zinc-800">Finished stock</h2>
+        <span className="ml-auto text-xs text-zinc-400">Shopify</span>
       </div>
       <div className="grow">
         {hasIssues ? (
@@ -419,8 +472,8 @@ function CardFinishedStock({ rows }: { rows: Row[] }) {
             {issues.map((r) => (
               <li key={r.id} className="flex items-center justify-between gap-3">
                 <span className="truncate text-sm font-medium text-zinc-900">{r.name}</span>
-                <span className={`shrink-0 text-sm font-semibold tabular-nums ${r.status === "OUT" ? "text-red-600" : "text-amber-700"}`}>
-                  {r.packedOnHand} in stock
+                <span className={`shrink-0 text-sm font-semibold tabular-nums ${r.displayStatus === "OUT" ? "text-red-600" : "text-amber-700"}`}>
+                  {r.displayQty} in stock
                 </span>
               </li>
             ))}
@@ -451,19 +504,37 @@ export default async function DashboardPage({
   const validFilters: FilterValue[] = ["all", "ready", "low", "out"];
   const activeFilter: FilterValue = validFilters.includes(filter) ? filter : "all";
 
-  const [allRows, ingredients] = await Promise.all([
+  const [allRowsRaw, ingredients, shopifyStock] = await Promise.all([
     getDashboardRows(),
     getIngredientPlanning(),
+    getShopifyFinishedStock(),
   ]);
 
-  const ready = allRows.filter((r) => r.status === "READY").length;
-  const low   = allRows.filter((r) => r.status === "LOW").length;
-  const out   = allRows.filter((r) => r.status === "OUT").length;
+  // Merge Shopify inventory into rows.
+  // shopifyQty   = live Shopify count (null if no mapping or fetch failed)
+  // displayQty   = shopifyQty when available, else internal ledger (fallback)
+  // displayStatus = status derived from displayQty
+  const allRows = allRowsRaw.map((row) => {
+    const shopifyQty = shopifyStock.get(row.id) ?? null;
+    const displayQty = shopifyQty ?? row.packedOnHand;
+    const displayStatus: Row["status"] =
+      displayQty <= 0 ? "OUT"
+      : displayQty < PACKED_LOW_THRESHOLD ? "LOW"
+      : "READY";
+    return { ...row, shopifyQty, displayQty, displayStatus };
+  });
+
+  // Ingredients with negative on-hand (internal ledger).
+  const negativeIngredients = ingredients.filter((i) => i.onHand < 0);
+
+  const ready = allRows.filter((r) => r.displayStatus === "READY").length;
+  const low   = allRows.filter((r) => r.displayStatus === "LOW").length;
+  const out   = allRows.filter((r) => r.displayStatus === "OUT").length;
 
   const filteredRows =
     activeFilter === "all"
       ? allRows
-      : allRows.filter((r) => r.status === activeFilter.toUpperCase() as Row["status"]);
+      : allRows.filter((r) => r.displayStatus === activeFilter.toUpperCase() as Row["status"]);
 
   return (
     <PageShell
@@ -472,6 +543,24 @@ export default async function DashboardPage({
       description="What ingredients to order, production capacity, and finished stock status."
     >
       <div className="space-y-8">
+
+        {/* ── Negative ingredient warning ───────────────────────────────────── */}
+        {negativeIngredients.length > 0 && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+            <p className="text-sm font-semibold text-amber-900">
+              Negative ingredient balance — check stock receipts
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {negativeIngredients.map((i) => (
+                <li key={i.id} className="text-sm text-amber-800">
+                  <span className="font-medium">{i.name}</span>:{" "}
+                  {i.onHand.toFixed(3)} {i.unit} — record a delivery in{" "}
+                  <Link href="/receipts" className="underline hover:text-amber-900">Receipts</Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* ── Order Today — primary decision panel ─────────────────────────── */}
         <OrderTodayPanel ingredients={ingredients} />
@@ -494,7 +583,7 @@ export default async function DashboardPage({
 
         {/* ── Secondary cards ───────────────────────────────────────────────── */}
         <div className="grid gap-4 lg:grid-cols-2">
-          <CardFinishedStock rows={allRows} />
+          <CardFinishedStock rows={allRows as AugmentedRow[]} />
           <CardProductionCapacity rows={allRows} />
         </div>
 
@@ -525,22 +614,33 @@ export default async function DashboardPage({
                 <thead className="border-b border-zinc-200 bg-zinc-50 text-xs font-medium uppercase tracking-wide text-zinc-500">
                   <tr>
                     <th className="px-4 py-3">Product</th>
-                    <th className="px-4 py-3 text-right">In stock</th>
+                    <th className="px-4 py-3 text-right">
+                      In stock
+                      <span className="ml-1 font-normal normal-case text-zinc-400">(Shopify)</span>
+                    </th>
+                    <th className="px-4 py-3 text-right">
+                      Packing ledger
+                      <span className="ml-1 font-normal normal-case text-zinc-400">(internal)</span>
+                    </th>
                     <th className="px-4 py-3 text-right">Can make more</th>
-                    <th className="px-4 py-3 text-right">Total available</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Suggested action</th>
                     <th className="px-4 py-3">Last sale</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100">
-                  {filteredRows.map((r) => (
+                  {filteredRows.map((r) => {
+                    const augmented = r as AugmentedRow;
+                    return (
                     <tr key={r.id} className="hover:bg-zinc-50/70">
                       <td className="px-4 py-3">
                         <p className="font-medium text-zinc-900">{r.name}</p>
                         <p className="font-mono text-xs text-zinc-400">{r.sku}</p>
                       </td>
-                      <td className={`px-4 py-3 text-right tabular-nums font-semibold ${r.packedOnHand <= 0 ? "text-red-600" : r.packedOnHand < PACKED_LOW_THRESHOLD ? "text-amber-700" : "text-zinc-900"}`}>
+                      <td className={`px-4 py-3 text-right tabular-nums font-semibold ${augmented.displayQty <= 0 ? "text-red-600" : augmented.displayQty < PACKED_LOW_THRESHOLD ? "text-amber-700" : "text-zinc-900"}`}>
+                        {augmented.shopifyQty !== null ? augmented.shopifyQty : <span className="font-normal text-zinc-400">—</span>}
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums text-zinc-500">
                         {r.packedOnHand}
                       </td>
                       <td className="px-4 py-3 text-right tabular-nums text-zinc-500">
@@ -548,16 +648,14 @@ export default async function DashboardPage({
                           ? <span className="text-zinc-300" title="No recipe configured">—</span>
                           : r.availableFromComponents}
                       </td>
-                      <td className="px-4 py-3 text-right tabular-nums font-medium text-zinc-800">
-                        {r.totalPotential}
-                      </td>
-                      <td className="px-4 py-3"><StatusPill status={r.status} /></td>
+                      <td className="px-4 py-3"><StatusPill status={augmented.displayStatus} /></td>
                       <td className="px-4 py-3 text-xs text-zinc-600">
-                        {computeAction(r.packedOnHand, r.availableFromComponents)}
+                        {computeAction(augmented.displayQty, r.availableFromComponents)}
                       </td>
                       <td className="px-4 py-3 text-sm text-zinc-500">{formatDate(r.lastSaleAt)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
