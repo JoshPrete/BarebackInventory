@@ -160,7 +160,7 @@ export async function adjustShopifyInventory(
   const res = await shopifyAdminGraphql<AdjustInventoryResponse>(ADJUST_INVENTORY_MUTATION, {
     input: {
       reason: "received",
-      name: "Packing run",
+      name: "available",
       changes: [{ inventoryItemId: inventoryItemGid, locationId, delta }],
     },
   });
