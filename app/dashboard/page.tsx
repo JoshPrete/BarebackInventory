@@ -1,7 +1,5 @@
 import { PageShell } from "@/app/_components/page-shell";
 import { prisma } from "@/lib/prisma";
-import { shopifyAdminGraphql } from "@/lib/shopify/admin";
-import { isShopifyConfigured } from "@/lib/shopify/config";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -148,42 +146,35 @@ async function getProductionCapacity() {
   });
 }
 
-// ─── Data: Shopify finished stock ─────────────────────────────────────────────
-
-const SHOPIFY_INVENTORY_QUERY = `
-  query GetVariantInventory($ids: [ID!]!) {
-    nodes(ids: $ids) {
-      ... on ProductVariant { id inventoryQuantity }
-    }
-  }
-`;
-
-type InventoryNode = { id: string; inventoryQuantity: number };
+// ─── Data: Shopify finished stock ────────────────────────────────────────────
+//
+// Reads inventoryQuantity from the ShopifyVariant table (cached during sync)
+// rather than making a live Shopify API call at render time.
+// This is reliable, fast, and requires no additional scope at render time.
+// Quantities reflect the last "Sync Shopify products" run.
 
 async function getShopifyFinishedStock(): Promise<Map<string, number>> {
-  if (!isShopifyConfigured()) return new Map();
   const mappings = await prisma.shopifyVariantMapping.findMany({
-    select: { sellableSkuId: true, shopifyVariantGid: true },
+    select: {
+      sellableSkuId: true,
+      shopifyVariantGid: true,
+    },
   });
   if (mappings.length === 0) return new Map();
-  try {
-    const res = await shopifyAdminGraphql<{ nodes: Array<InventoryNode | null> }>(
-      SHOPIFY_INVENTORY_QUERY,
-      { ids: mappings.map((m) => m.shopifyVariantGid) },
-    );
-    const qtyByGid = new Map(
-      (res.data?.nodes ?? [])
-        .filter((n): n is InventoryNode => n !== null && "inventoryQuantity" in n)
-        .map((n) => [n.id, n.inventoryQuantity ?? 0]),
-    );
-    return new Map(
-      mappings
-        .filter((m) => qtyByGid.has(m.shopifyVariantGid))
-        .map((m) => [m.sellableSkuId, qtyByGid.get(m.shopifyVariantGid)!]),
-    );
-  } catch {
-    return new Map();
-  }
+
+  const variantGids = mappings.map((m) => m.shopifyVariantGid);
+  const variants = await prisma.shopifyVariant.findMany({
+    where: { shopifyVariantGid: { in: variantGids } },
+    select: { shopifyVariantGid: true, inventoryQuantity: true },
+  });
+
+  const qtyByGid = new Map(
+    variants.map((v) => [v.shopifyVariantGid, v.inventoryQuantity ?? 0]),
+  );
+
+  return new Map(
+    mappings.map((m) => [m.sellableSkuId, qtyByGid.get(m.shopifyVariantGid) ?? 0]),
+  );
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
