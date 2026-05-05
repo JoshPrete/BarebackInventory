@@ -120,7 +120,7 @@ async function getProductionCapacity() {
 
   return skus.map((sku) => {
     const rules = rulesBySkuId.get(sku.id) ?? [];
-    const shopifyQty = shopifyStock.get(sku.id) ?? 0;
+    const shopifyQty = shopifyStock.has(sku.id) ? shopifyStock.get(sku.id)! : null;
 
     if (rules.length === 0) return { id: sku.id, name: sku.name, canMake: null, bottleneck: null, shopifyQty };
 
@@ -148,33 +148,23 @@ async function getProductionCapacity() {
 
 // ─── Data: Shopify finished stock ────────────────────────────────────────────
 //
-// Reads inventoryQuantity from the ShopifyVariant table (cached during sync)
-// rather than making a live Shopify API call at render time.
-// This is reliable, fast, and requires no additional scope at render time.
-// Quantities reflect the last "Sync Shopify products" run.
+// Returns inventoryQuantity per sellableSkuId from the ShopifyVariant table,
+// joined through ShopifyVariantMapping. Uses raw SQL so the query works
+// regardless of whether the generated Prisma client has been regenerated.
+//
+// Return value:
+//   null  → no Shopify mapping exists for this SKU (never synced)
+//   number → Shopify inventoryQuantity at last sync (may be 0)
 
-async function getShopifyFinishedStock(): Promise<Map<string, number>> {
-  const mappings = await prisma.shopifyVariantMapping.findMany({
-    select: {
-      sellableSkuId: true,
-      shopifyVariantGid: true,
-    },
-  });
-  if (mappings.length === 0) return new Map();
-
-  const variantGids = mappings.map((m) => m.shopifyVariantGid);
-  const variants = await prisma.shopifyVariant.findMany({
-    where: { shopifyVariantGid: { in: variantGids } },
-    select: { shopifyVariantGid: true, inventoryQuantity: true },
-  });
-
-  const qtyByGid = new Map(
-    variants.map((v) => [v.shopifyVariantGid, v.inventoryQuantity ?? 0]),
-  );
-
-  return new Map(
-    mappings.map((m) => [m.sellableSkuId, qtyByGid.get(m.shopifyVariantGid) ?? 0]),
-  );
+async function getShopifyFinishedStock(): Promise<Map<string, number | null>> {
+  const rows = await prisma.$queryRaw<
+    { sellableSkuId: string; inventoryQuantity: number | null }[]
+  >`
+    SELECT m."sellableSkuId", v."inventoryQuantity"
+    FROM "ShopifyVariantMapping" m
+    JOIN "ShopifyVariant" v ON v."shopifyVariantGid" = m."shopifyVariantGid"
+  `;
+  return new Map(rows.map((r) => [r.sellableSkuId, r.inventoryQuantity]));
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -292,8 +282,8 @@ export default async function DashboardPage() {
   }
 
   // ── Summary counts ───────────────────────────────────────────────────────
-  const inStockCount = products.filter((p) => p.shopifyQty > 0).length;
-  const outCount = products.filter((p) => p.shopifyQty === 0).length;
+  const inStockCount = products.filter((p) => p.shopifyQty !== null && p.shopifyQty > 0).length;
+  const outCount = products.filter((p) => p.shopifyQty !== null && p.shopifyQty === 0).length;
 
   // ── ACTION NOW: single highest-priority signal ───────────────────────────
   type ActionNow =
@@ -399,9 +389,12 @@ export default async function DashboardPage() {
 
         {/* ── WHAT YOU CAN MAKE ───────────────────────────────────────────── */}
         <section>
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-zinc-400">
-            What you can make
-          </h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400">
+              What you can make
+            </h2>
+            <span className="text-xs text-zinc-400">Stock shown from Shopify</span>
+          </div>
           <div className="rounded-xl border border-blue-100 bg-blue-50 divide-y divide-blue-100">
             {products.map((p) => {
               if (p.canMake === null) return null;
@@ -422,7 +415,9 @@ export default async function DashboardPage() {
                     ) : (
                       <p className="text-sm font-medium text-zinc-400">Can&apos;t pack yet</p>
                     )}
-                    <p className="text-xs text-zinc-400">{p.shopifyQty} on Shopify</p>
+                    <p className="text-xs text-zinc-400">
+                      {p.shopifyQty === null ? "Unknown" : p.shopifyQty} on Shopify
+                    </p>
                   </div>
                 </div>
               );
