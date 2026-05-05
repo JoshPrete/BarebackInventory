@@ -3,7 +3,7 @@ import { AppNav } from "@/app/_components/app-nav";
 import { BrandMark } from "@/app/_components/brand-mark";
 import { getShopifyConfig } from "@/lib/shopify/config";
 import { fetchShopifyShopName } from "@/lib/shopify/admin";
-import { syncCatalogFormAction } from "@/actions/shopifyActions";
+import { SyncButton } from "@/app/integrations/sync-button";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -96,19 +96,11 @@ export default async function IntegrationsPage() {
             <p className="mt-1 text-sm text-zinc-500">
               Pulls all active products and variants from your Shopify store. Creates a product record here for each variant. Safe to run multiple times — existing records are updated, not duplicated.
             </p>
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <form action={syncCatalogFormAction}>
-                <button
-                  type="submit"
-                  disabled={!apiOk}
-                  className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-40"
-                >
-                  Sync Shopify products
-                </button>
-              </form>
+            <div className="mt-4 space-y-3">
+              <SyncButton disabled={!apiOk} />
               <Link
                 href="/shopify-sync"
-                className="text-sm text-zinc-500 hover:text-zinc-800 hover:underline"
+                className="block text-xs text-zinc-400 hover:text-zinc-600 hover:underline"
               >
                 Manage variant mappings →
               </Link>

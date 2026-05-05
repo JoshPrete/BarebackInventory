@@ -1,8 +1,8 @@
 import { PageShell } from "@/app/_components/page-shell";
 import {
-  syncCatalogFormAction,
   mapVariantFormAction,
 } from "@/actions/shopifyActions";
+import { SyncButton } from "@/app/integrations/sync-button";
 import {
   getVariantMappingQueue,
   type VariantMappingRow,
@@ -58,14 +58,7 @@ export default async function ShopifySyncPage() {
               )}
             </p>
           </div>
-          <form action={syncCatalogFormAction}>
-            <button
-              type="submit"
-              className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-offset-2"
-            >
-              Sync catalog
-            </button>
-          </form>
+          <SyncButton />
         </div>
 
         {/* Variant mapping queue */}

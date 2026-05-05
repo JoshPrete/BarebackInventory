@@ -34,17 +34,44 @@ export async function mapVariantToSku(
   return _mapVariantToSku(input);
 }
 
+// ─── Typed result for UI-facing form actions ──────────────────────────────────
+
+export type SyncCatalogActionResult = {
+  ok: true;
+  productsUpserted: number;
+  variantsUpserted: number;
+  skusCreated: number;
+  skusUpdated: number;
+} | {
+  ok: false;
+  error: string;
+};
+
 /**
- * FormData wrapper for syncShopifyCatalog — called from a <form> action.
- * Revalidates /shopify-sync so the variant table refreshes.
+ * FormData wrapper for syncShopifyCatalog — called from useActionState in SyncButton.
+ * Never throws: errors are returned as { ok: false, error } so the UI can display them.
  */
 export async function syncCatalogFormAction(
+  _prev: SyncCatalogActionResult | null,
   _formData: FormData,
-): Promise<void> {
-  await _syncCatalog();
-  revalidatePath("/shopify-sync");
-  revalidatePath("/skus");
-  revalidatePath("/dashboard");
+): Promise<SyncCatalogActionResult> {
+  try {
+    const result = await _syncCatalog();
+    revalidatePath("/shopify-sync");
+    revalidatePath("/skus");
+    revalidatePath("/dashboard");
+    return {
+      ok: true,
+      productsUpserted: result.productsUpserted,
+      variantsUpserted: result.variantsUpserted,
+      skusCreated: result.skusCreated,
+      skusUpdated: result.skusUpdated,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[syncCatalogFormAction] Sync failed:", message);
+    return { ok: false, error: message };
+  }
 }
 
 /**

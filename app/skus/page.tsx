@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { PageShell } from "@/app/_components/page-shell";
-import { syncCatalogFormAction } from "@/actions/shopifyActions";
+import { SkuSyncButton } from "@/app/skus/sync-button";
 
 export const dynamic = "force-dynamic";
 
@@ -42,14 +42,7 @@ export default async function SkusPage() {
               Sync your Shopify store to import products and start mapping recipes.
             </p>
             <div className="mt-5 flex flex-col items-center gap-3">
-              <form action={syncCatalogFormAction}>
-                <button
-                  type="submit"
-                  className="rounded-md bg-zinc-900 px-5 py-2 text-sm font-medium text-white hover:bg-zinc-700"
-                >
-                  Sync Shopify products
-                </button>
-              </form>
+              <SkuSyncButton />
               <Link href="/shopify-sync" className="text-xs text-zinc-400 hover:text-zinc-600 hover:underline">
                 Advanced sync options →
               </Link>
@@ -121,14 +114,7 @@ export default async function SkusPage() {
         {/* Sync controls at bottom when products exist */}
         {skus.length > 0 && (
           <div className="flex items-center gap-4">
-            <form action={syncCatalogFormAction}>
-              <button
-                type="submit"
-                className="rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-              >
-                Re-sync from Shopify
-              </button>
-            </form>
+            <SkuSyncButton label="Re-sync from Shopify" variant="secondary" />
             <Link href="/shopify-sync" className="text-xs text-zinc-400 hover:text-zinc-600 hover:underline">
               Advanced sync →
             </Link>
