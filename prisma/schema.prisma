@@ -64,6 +64,8 @@ model ShopifyVariant {
   sku                     String?
   price                   String
   inventoryItemGid        String?
+  /// Shopify inventoryQuantity at last sync. Null if inventory tracking is off for this variant.
+  inventoryQuantity       Int?
   syncedAt                DateTime       @default(now())
   updatedAt               DateTime       @updatedAt
   product                 ShopifyProduct @relation(fields: [shopifyProductGid], references: [shopifyProductGid], onDelete: Cascade)

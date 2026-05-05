@@ -1,12 +1,13 @@
 /**
  * Live Shopify adapter — fetches products and orders from the Shopify Admin
- * GraphQL API. Only instantiated when SHOPIFY_ADMIN_ACCESS_TOKEN and
- * SHOPIFY_SHOP_DOMAIN are present in the environment; falls back to
- * mockShopifyAdapter otherwise.
+ * GraphQL API. Only instantiated when Shopify credentials are present in the
+ * environment; falls back to mockShopifyAdapter otherwise.
  *
- * Pagination: fetches up to 250 products (100 variants each) and 250 orders
- * in a single page. Cursor-based pagination can be added later if the store
- * grows beyond these limits.
+ * Products: fetches up to 250 products (100 variants each), including current
+ * inventoryQuantity per variant (requires read_inventory scope).
+ *
+ * Orders: fetches up to 250 paid orders from the last 30 days by default,
+ * or since a provided ISO timestamp. Requires read_orders scope.
  */
 
 import { shopifyAdminGraphql } from "@/lib/shopify/admin";
@@ -35,6 +36,7 @@ const PRODUCTS_QUERY = `
                 title
                 sku
                 price
+                inventoryQuantity
                 inventoryItem { id }
               }
             }
@@ -58,6 +60,7 @@ interface GqlProductNode {
         title: string;
         sku: string | null;
         price: string;
+        inventoryQuantity: number | null;
         inventoryItem: { id: string } | null;
       };
     }[];
@@ -88,6 +91,7 @@ async function fetchAllProducts(): Promise<ShopifyProductRecord[]> {
       title: v.title,
       sku: v.sku ?? null,
       price: v.price,
+      inventoryQuantity: v.inventoryQuantity ?? null,
       inventoryItemGid: v.inventoryItem?.id ?? null,
     })),
   }));
@@ -95,11 +99,16 @@ async function fetchAllProducts(): Promise<ShopifyProductRecord[]> {
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
-// Fetch the 10 most recent orders (by processed_at desc).
-// The `query` variable narrows by created_at when a `since` filter is passed.
+/**
+ * Fetches paid orders. When sinceIso is omitted, defaults to 30 days ago so
+ * the 14-day burn rate window is always covered with a buffer.
+ *
+ * Filter: financial_status:paid ensures only confirmed sales are imported.
+ * Cancelled, refunded, and pending orders are excluded.
+ */
 const ORDERS_QUERY = `
   query GetOrders($query: String) {
-    orders(first: 10, sortKey: PROCESSED_AT, reverse: true, query: $query) {
+    orders(first: 250, sortKey: PROCESSED_AT, reverse: true, query: $query) {
       edges {
         node {
           id
@@ -125,7 +134,6 @@ const ORDERS_QUERY = `
 
 interface GqlOrderNode {
   id: string;
-  /** Display name e.g. "#1001" — orderNumber field is not available to all app types. */
   name: string;
   createdAt: string;
   displayFinancialStatus: string;
@@ -146,8 +154,17 @@ interface GqlOrdersResponse {
   orders: { edges: { node: GqlOrderNode }[] };
 }
 
+function defaultSinceIso(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 30);
+  return d.toISOString();
+}
+
 async function fetchAllOrders(sinceIso?: string): Promise<ShopifyOrderRecord[]> {
-  const queryStr = sinceIso ? `created_at:>=${sinceIso}` : undefined;
+  const since = sinceIso || defaultSinceIso();
+  // Shopify query filter: paid orders since the given date.
+  const queryStr = `created_at:>=${since} financial_status:paid`;
+
   const res = await shopifyAdminGraphql<GqlOrdersResponse>(ORDERS_QUERY, { query: queryStr });
   if (res.errors?.length) {
     throw new Error(`Shopify orders query failed: ${res.errors.map((e) => e.message).join(", ")}`);
@@ -155,7 +172,6 @@ async function fetchAllOrders(sinceIso?: string): Promise<ShopifyOrderRecord[]> 
 
   return (res.data?.orders.edges ?? []).map(({ node: o }): ShopifyOrderRecord => ({
     shopifyOrderGid: o.id,
-    // Parse "#1001" → 1001; fall back to 0 if format differs.
     orderNumber: parseInt(o.name.replace(/\D/g, ""), 10) || 0,
     createdAt: o.createdAt,
     financialStatus: o.displayFinancialStatus,

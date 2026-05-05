@@ -21,6 +21,8 @@ export interface ShopifyVariantRecord {
   sku: string | null;
   price: string;
   inventoryItemGid: string | null;
+  /** Shopify inventoryQuantity at time of fetch. Null if inventory tracking is off. */
+  inventoryQuantity: number | null;
 }
 
 export interface ShopifyOrderRecord {

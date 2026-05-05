@@ -42,35 +42,59 @@ export type SyncCatalogActionResult = {
   variantsUpserted: number;
   skusCreated: number;
   skusUpdated: number;
+  ordersImported: number;
+  ordersSkipped: number;
+  lineItemsImported: number;
+  orderErrors: string[];
 } | {
   ok: false;
   error: string;
 };
 
 /**
- * FormData wrapper for syncShopifyCatalog — called from useActionState in SyncButton.
- * Never throws: errors are returned as { ok: false, error } so the UI can display them.
+ * FormData wrapper for syncShopifyCatalog + syncShopifyOrders.
+ * Runs both in sequence. Never throws: errors are returned as { ok: false, error }.
+ *
+ * Orders sync runs after catalog sync so that ShopifyVariantMapping rows
+ * exist before we try to resolve variant GIDs → sellableSkuIds.
+ * Orders default to the last 30 days with financial_status:paid.
  */
 export async function syncCatalogFormAction(
   _prev: SyncCatalogActionResult | null,
   _formData: FormData,
 ): Promise<SyncCatalogActionResult> {
   try {
-    const result = await _syncCatalog();
+    const catalog = await _syncCatalog();
+
+    // Orders sync runs after catalog so new mappings are available.
+    const orders = await _syncOrders();
+
     revalidatePath("/shopify-sync");
     revalidatePath("/skus");
     revalidatePath("/dashboard");
+    revalidatePath("/sales");
+
     return {
       ok: true,
-      productsUpserted: result.productsUpserted,
-      variantsUpserted: result.variantsUpserted,
-      skusCreated: result.skusCreated,
-      skusUpdated: result.skusUpdated,
+      productsUpserted: catalog.productsUpserted,
+      variantsUpserted: catalog.variantsUpserted,
+      skusCreated: catalog.skusCreated,
+      skusUpdated: catalog.skusUpdated,
+      ordersImported: orders.ordersImported,
+      ordersSkipped: orders.ordersSkipped,
+      lineItemsImported: orders.lineItemsImported,
+      orderErrors: orders.errors,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[syncCatalogFormAction] Sync failed:", message);
-    return { ok: false, error: message };
+    // Provide scope-specific guidance in the error message.
+    const hint =
+      message.includes("read_products") ? " — ensure read_products scope is enabled on your Shopify custom app" :
+      message.includes("read_orders") ? " — ensure read_orders scope is enabled on your Shopify custom app" :
+      message.includes("read_inventory") ? " — ensure read_inventory scope is enabled on your Shopify custom app" :
+      "";
+    return { ok: false, error: `${message}${hint}` };
   }
 }
 

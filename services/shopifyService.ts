@@ -71,12 +71,14 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
           sku: variant.sku,
           price: variant.price,
           inventoryItemGid: variant.inventoryItemGid,
+          inventoryQuantity: variant.inventoryQuantity,
         },
         update: {
           title: variant.title,
           sku: variant.sku,
           price: variant.price,
           inventoryItemGid: variant.inventoryItemGid,
+          inventoryQuantity: variant.inventoryQuantity,
           updatedAt: new Date(),
         },
       });
