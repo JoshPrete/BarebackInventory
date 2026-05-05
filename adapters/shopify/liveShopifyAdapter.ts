@@ -20,6 +20,9 @@ import type {
 
 // ─── Products ─────────────────────────────────────────────────────────────────
 
+// NOTE: ProductVariant.inventoryQuantity was deprecated in Shopify API 2024-04
+// and returns null for inventory-tracked variants in 2025-01+.
+// Use inventoryItem.inventoryLevels instead, summing available qty across locations.
 const PRODUCTS_QUERY = `
   query GetProducts($cursor: String) {
     products(first: 250, after: $cursor) {
@@ -36,8 +39,19 @@ const PRODUCTS_QUERY = `
                 title
                 sku
                 price
-                inventoryQuantity
-                inventoryItem { id }
+                inventoryItem {
+                  id
+                  inventoryLevels(first: 20) {
+                    edges {
+                      node {
+                        quantities(names: ["available"]) {
+                          name
+                          quantity
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -60,8 +74,16 @@ interface GqlProductNode {
         title: string;
         sku: string | null;
         price: string;
-        inventoryQuantity: number | null;
-        inventoryItem: { id: string } | null;
+        inventoryItem: {
+          id: string;
+          inventoryLevels: {
+            edges: {
+              node: {
+                quantities: { name: string; quantity: number }[];
+              };
+            }[];
+          };
+        } | null;
       };
     }[];
   };
@@ -85,15 +107,26 @@ async function fetchAllProducts(): Promise<ShopifyProductRecord[]> {
     title: p.title,
     handle: p.handle,
     status: p.status,
-    variants: p.variants.edges.map(({ node: v }): ShopifyVariantRecord => ({
-      shopifyVariantGid: v.id,
-      shopifyProductGid: p.id,
-      title: v.title,
-      sku: v.sku ?? null,
-      price: v.price,
-      inventoryQuantity: v.inventoryQuantity ?? null,
-      inventoryItemGid: v.inventoryItem?.id ?? null,
-    })),
+    variants: p.variants.edges.map(({ node: v }): ShopifyVariantRecord => {
+      // Sum available qty across all locations for this variant.
+      // inventoryItem is null when inventory tracking is not managed by Shopify.
+      const totalAvailable = v.inventoryItem
+        ? v.inventoryItem.inventoryLevels.edges.reduce((sum, { node: level }) => {
+            const available = level.quantities.find((q) => q.name === "available");
+            return sum + (available?.quantity ?? 0);
+          }, 0)
+        : null;
+
+      return {
+        shopifyVariantGid: v.id,
+        shopifyProductGid: p.id,
+        title: v.title,
+        sku: v.sku ?? null,
+        price: v.price,
+        inventoryQuantity: totalAvailable,
+        inventoryItemGid: v.inventoryItem?.id ?? null,
+      };
+    }),
   }));
 }
 
