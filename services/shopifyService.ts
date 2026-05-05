@@ -21,11 +21,18 @@ function getAdapter(): ShopifyAdapter {
 export interface SyncCatalogResult {
   productsUpserted: number;
   variantsUpserted: number;
+  skusCreated: number;
+  skusUpdated: number;
 }
 
 /**
- * Pull all products + variants from Shopify and upsert into
- * ShopifyProduct / ShopifyVariant tables.
+ * Pull all products + variants from Shopify and upsert into:
+ *   - ShopifyProduct / ShopifyVariant (catalog mirror)
+ *   - SellableSKU (one per variant, using Shopify SKU as the unique code)
+ *   - ShopifyVariantMapping (links SellableSKU ↔ ShopifyVariant)
+ *
+ * Idempotent: safe to run multiple times. Existing rows are updated, not duplicated.
+ * Running order: ShopifyProduct → ShopifyVariant → SellableSKU → ShopifyVariantMapping.
  */
 export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
   const adapter = getAdapter();
@@ -33,6 +40,8 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
 
   let productsUpserted = 0;
   let variantsUpserted = 0;
+  let skusCreated = 0;
+  let skusUpdated = 0;
 
   for (const product of products) {
     await prisma.shopifyProduct.upsert({
@@ -72,10 +81,65 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
         },
       });
       variantsUpserted++;
+
+      // Derive a stable SKU code and human name from Shopify data.
+      // "Default Title" is Shopify's placeholder for single-variant products — omit it.
+      const skuCode =
+        variant.sku?.trim() ||
+        `SHOPIFY-${variant.shopifyVariantGid.split("/").pop()}`;
+      const skuName =
+        variant.title === "Default Title"
+          ? product.title
+          : `${product.title} — ${variant.title}`;
+
+      // Check whether this variant already has a mapping (i.e. was synced before).
+      const existingMapping = await prisma.shopifyVariantMapping.findFirst({
+        where: { shopifyVariantGid: variant.shopifyVariantGid },
+        select: { sellableSkuId: true },
+      });
+
+      if (existingMapping) {
+        // Variant already linked — update the SKU name in case product/variant title changed.
+        await prisma.sellableSKU.update({
+          where: { id: existingMapping.sellableSkuId },
+          data: { name: skuName },
+        });
+        // Keep inventoryItemGid current on the mapping.
+        if (variant.inventoryItemGid) {
+          await prisma.shopifyVariantMapping.update({
+            where: { sellableSkuId: existingMapping.sellableSkuId },
+            data: { shopifyInventoryItemGid: variant.inventoryItemGid },
+          });
+        }
+        skusUpdated++;
+      } else {
+        // No mapping yet — upsert SellableSKU by sku code, then link it.
+        // Upsert handles the case where a SellableSKU was manually created
+        // with the same SKU code before this sync ran.
+        const sellableSku = await prisma.sellableSKU.upsert({
+          where: { sku: skuCode },
+          create: { name: skuName, sku: skuCode, isBundle: false },
+          update: { name: skuName },
+        });
+
+        await prisma.shopifyVariantMapping.upsert({
+          where: { sellableSkuId: sellableSku.id },
+          create: {
+            sellableSkuId: sellableSku.id,
+            shopifyVariantGid: variant.shopifyVariantGid,
+            shopifyInventoryItemGid: variant.inventoryItemGid ?? null,
+          },
+          update: {
+            shopifyVariantGid: variant.shopifyVariantGid,
+            shopifyInventoryItemGid: variant.inventoryItemGid ?? null,
+          },
+        });
+        skusCreated++;
+      }
     }
   }
 
-  return { productsUpserted, variantsUpserted };
+  return { productsUpserted, variantsUpserted, skusCreated, skusUpdated };
 }
 
 // ─── Variant mapping queue ────────────────────────────────────────────────────

@@ -43,6 +43,8 @@ export async function syncCatalogFormAction(
 ): Promise<void> {
   await _syncCatalog();
   revalidatePath("/shopify-sync");
+  revalidatePath("/skus");
+  revalidatePath("/dashboard");
 }
 
 /**
