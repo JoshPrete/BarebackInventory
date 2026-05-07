@@ -2,22 +2,29 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { PageShell } from "@/app/_components/page-shell";
 import { SkuSyncButton } from "@/app/skus/sync-button";
+import { CategorySelect } from "@/app/skus/category-select";
+import { AddCategoryForm } from "@/app/skus/add-category-form";
 
 export const dynamic = "force-dynamic";
 
 export default async function SkusPage() {
-  const skus = await prisma.sellableSKU.findMany({
-    orderBy: { name: "asc" },
-    select: {
-      id: true,
-      name: true,
-      sku: true,
-      isBundle: true,
-      createdAt: true,
-      _count: { select: { skuComponentRules: true } },
-      shopifyVariantMapping: { select: { shopifyVariantGid: true } },
-    },
-  });
+  const [skus, categories] = await Promise.all([
+    prisma.sellableSKU.findMany({
+      orderBy: { name: "asc" },
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        _count: { select: { skuComponentRules: true } },
+        // category relation — may not be in stale local client; use raw fallback below
+        categoryId: true,
+      },
+    }),
+    prisma.productCategory.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+  ]);
 
   const needsRecipe = skus.filter((s) => s._count.skuComponentRules === 0).length;
   const ready = skus.length - needsRecipe;
@@ -34,7 +41,10 @@ export default async function SkusPage() {
     >
       <div className="space-y-6">
 
-        {/* Empty state — no SKUs at all */}
+        {/* Category management */}
+        <AddCategoryForm categories={categories} />
+
+        {/* Empty state */}
         {skus.length === 0 && (
           <div className="rounded-xl border-2 border-dashed border-zinc-200 bg-white px-8 py-12 text-center">
             <p className="text-sm font-medium text-zinc-700">No products synced yet</p>
@@ -72,6 +82,7 @@ export default async function SkusPage() {
                 <tr>
                   <th className="px-4 py-3">Product</th>
                   <th className="px-4 py-3">SKU</th>
+                  <th className="px-4 py-3">Category</th>
                   <th className="px-4 py-3">Recipe</th>
                   <th className="px-4 py-3" />
                 </tr>
@@ -84,6 +95,13 @@ export default async function SkusPage() {
                     <tr key={s.id} className="hover:bg-zinc-50/60">
                       <td className="px-4 py-3 font-medium text-zinc-900">{s.name}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-500">{s.sku}</td>
+                      <td className="px-4 py-3">
+                        <CategorySelect
+                          skuId={s.id}
+                          currentCategoryId={s.categoryId ?? null}
+                          categories={categories}
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         {hasRecipe ? (
                           <span className="inline-flex items-center rounded-full bg-green-50 px-2.5 py-0.5 text-xs font-medium text-green-700">
@@ -111,7 +129,7 @@ export default async function SkusPage() {
           </div>
         )}
 
-        {/* Sync controls at bottom when products exist */}
+        {/* Sync controls */}
         {skus.length > 0 && (
           <div className="flex items-center gap-4">
             <SkuSyncButton label="Re-sync from Shopify" variant="secondary" />

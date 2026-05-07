@@ -140,11 +140,23 @@ model Supplier {
   leadTimeDays Int?
 }
 
+/// User-defined product category — created on the Products page and assigned
+/// to any SellableSKU. Examples: "Ready to Sell", "Component", "Merch".
+model ProductCategory {
+  id        String        @id @default(uuid())
+  name      String        @unique
+  createdAt DateTime      @default(now())
+  skus      SellableSKU[]
+}
+
 model SellableSKU {
   id                 String                 @id @default(uuid())
   name               String
   sku                String                 @unique
   isBundle           Boolean                @default(false)
+  /// Optional user-defined category. Null = uncategorised.
+  categoryId         String?
+  category           ProductCategory?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   createdAt          DateTime               @default(now())
   skuComponentRules  SKUComponentRule[]
   bundleAsParent     BundleComponent[]      @relation("BundleParent")
@@ -153,6 +165,8 @@ model SellableSKU {
   packedStockMovements PackedStockMovement[]
   shopifyVariantMapping ShopifyVariantMapping?
   alerts               Alert[]
+
+  @@index([categoryId])
 }
 
 /// Links an internal sellable SKU to Shopify Admin API resources (variant + optional inventory item GIDs).
