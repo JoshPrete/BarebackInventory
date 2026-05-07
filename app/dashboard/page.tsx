@@ -223,29 +223,6 @@ export default async function DashboardPage() {
     );
   }
 
-  if (mappedSkus === 0) {
-    return (
-      <PageShell
-        active="/dashboard"
-        title="What do I need to do today?"
-        description={`${totalSkus} product${totalSkus !== 1 ? "s" : ""} synced from Shopify.`}
-      >
-        <div className="rounded-xl border-2 border-amber-200 bg-amber-50 px-8 py-12 text-center">
-          <p className="text-base font-semibold text-amber-900">Map your recipes before planning can begin</p>
-          <p className="mt-2 text-sm text-amber-700 max-w-sm mx-auto">
-            {totalSkus} product{totalSkus !== 1 ? "s were" : " was"} imported from Shopify. Each product needs its ingredient recipe set before the dashboard can calculate production capacity and ordering needs.
-          </p>
-          <Link
-            href="/skus"
-            className="mt-6 inline-block rounded-md bg-amber-800 px-5 py-2 text-sm font-medium text-white hover:bg-amber-900"
-          >
-            Set ingredient recipes →
-          </Link>
-        </div>
-      </PageShell>
-    );
-  }
-
   const [ingredients, products] = await Promise.all([
     getIngredientPlanning(),
     getProductionCapacity(),
@@ -284,6 +261,7 @@ export default async function DashboardPage() {
   // ── Summary counts ───────────────────────────────────────────────────────
   const inStockCount = products.filter((p) => p.shopifyQty !== null && p.shopifyQty > 0).length;
   const outCount = products.filter((p) => p.shopifyQty !== null && p.shopifyQty === 0).length;
+  const noRecipeCount = totalSkus - mappedSkus;
 
   // ── ACTION NOW: single highest-priority signal ───────────────────────────
   type ActionNow =
@@ -346,6 +324,18 @@ export default async function DashboardPage() {
     >
       <div className="space-y-6">
 
+        {/* ── RECIPE SETUP CALLOUT (non-blocking) ─────────────────────────── */}
+        {noRecipeCount > 0 && (
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-5 py-3">
+            <p className="text-sm text-amber-800">
+              <span className="font-semibold">{noRecipeCount} product{noRecipeCount !== 1 ? "s" : ""}</span> have no ingredient recipe — production planning is limited until recipes are set.
+            </p>
+            <Link href="/skus" className="shrink-0 text-xs font-semibold text-amber-900 hover:underline">
+              Set recipes →
+            </Link>
+          </div>
+        )}
+
         {/* ── ACTION NOW ─────────────────────────────────────────────────── */}
         <div className={`rounded-xl border-2 px-6 py-5 ${heroStyles[actionNow.type]}`}>
           <p className={`text-xs font-semibold uppercase tracking-widest mb-1 ${actionNow.type === "blocked" ? "text-red-200" : "text-zinc-400"}`}>
@@ -396,32 +386,32 @@ export default async function DashboardPage() {
             <span className="text-xs text-zinc-400">Stock shown from Shopify</span>
           </div>
           <div className="rounded-xl border border-blue-100 bg-blue-50 divide-y divide-blue-100">
-            {products.map((p) => {
-              if (p.canMake === null) return null;
-              return (
-                <div key={p.id} className="flex items-center justify-between gap-4 px-5 py-4">
-                  <div>
-                    <p className="font-medium text-zinc-900">{p.name}</p>
-                    {p.canMake === 0 && p.bottleneck && (
-                      <p className="mt-0.5 text-xs text-red-600">Waiting on {p.bottleneck}</p>
-                    )}
-                    {p.canMake === 0 && !p.bottleneck && (
-                      <p className="mt-0.5 text-xs text-zinc-400">No stock available</p>
-                    )}
-                  </div>
-                  <div className="text-right shrink-0">
-                    {p.canMake > 0 ? (
-                      <p className="text-lg font-bold text-blue-900">{p.canMake} units</p>
-                    ) : (
-                      <p className="text-sm font-medium text-zinc-400">Can&apos;t pack yet</p>
-                    )}
-                    <p className="text-xs text-zinc-400">
-                      {p.shopifyQty === null ? "Unknown" : p.shopifyQty} on Shopify
-                    </p>
-                  </div>
+            {products.map((p) => (
+              <div key={p.id} className="flex items-center justify-between gap-4 px-5 py-4">
+                <div>
+                  <p className="font-medium text-zinc-900">{p.name}</p>
+                  {p.canMake === null && (
+                    <p className="mt-0.5 text-xs text-amber-600">No recipe set</p>
+                  )}
+                  {p.canMake === 0 && p.bottleneck && (
+                    <p className="mt-0.5 text-xs text-red-600">Waiting on {p.bottleneck}</p>
+                  )}
+                  {p.canMake === 0 && !p.bottleneck && (
+                    <p className="mt-0.5 text-xs text-zinc-400">No ingredients stocked</p>
+                  )}
                 </div>
-              );
-            })}
+                <div className="text-right shrink-0">
+                  {p.canMake !== null && p.canMake > 0 ? (
+                    <p className="text-lg font-bold text-blue-900">{p.canMake} units</p>
+                  ) : p.canMake !== null ? (
+                    <p className="text-sm font-medium text-zinc-400">Can&apos;t pack yet</p>
+                  ) : null}
+                  <p className="text-xs text-zinc-400">
+                    {p.shopifyQty === null ? "Unknown" : p.shopifyQty} on Shopify
+                  </p>
+                </div>
+              </div>
+            ))}
             <div className="px-5 py-3">
               <Link
                 href="/packing"
