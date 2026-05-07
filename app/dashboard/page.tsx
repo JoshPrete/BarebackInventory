@@ -92,11 +92,17 @@ async function getIngredientPlanning() {
 // ─── Data: production capacity ────────────────────────────────────────────────
 
 async function getProductionCapacity() {
-  const [skus, bomRules, componentSums, shopifyStock] = await Promise.all([
+  const [skus, categoryRows, bomRules, componentSums, shopifyStock] = await Promise.all([
     prisma.sellableSKU.findMany({
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),
+    // Read categoryId + name via raw SQL — categoryId may not be in stale client.
+    prisma.$queryRaw<{ id: string; categoryName: string | null }[]>`
+      SELECT s."id", c."name" AS "categoryName"
+      FROM "SellableSKU" s
+      LEFT JOIN "ProductCategory" c ON c."id" = s."categoryId"
+    `,
     prisma.sKUComponentRule.findMany({
       select: { skuId: true, componentId: true, qtyPerUnit: true, component: { select: { name: true } } },
     }),
@@ -106,6 +112,8 @@ async function getProductionCapacity() {
     }),
     getShopifyFinishedStock(),
   ]);
+
+  const categoryBySkuId = new Map(categoryRows.map((r) => [r.id, r.categoryName]));
 
   const componentOnHand = new Map(
     componentSums.map((s) => [s.componentId, s._sum.qtyChange ?? 0]),
@@ -122,7 +130,8 @@ async function getProductionCapacity() {
     const rules = rulesBySkuId.get(sku.id) ?? [];
     const shopifyQty = shopifyStock.has(sku.id) ? shopifyStock.get(sku.id)! : null;
 
-    if (rules.length === 0) return { id: sku.id, name: sku.name, canMake: null, bottleneck: null, shopifyQty };
+    const categoryName = categoryBySkuId.get(sku.id) ?? null;
+    if (rules.length === 0) return { id: sku.id, name: sku.name, canMake: null, bottleneck: null, shopifyQty, categoryName };
 
     let canMake = Infinity;
     let bottleneck: string | null = null;
@@ -142,6 +151,7 @@ async function getProductionCapacity() {
       canMake: Math.max(0, canMake === Infinity ? 0 : canMake),
       bottleneck,
       shopifyQty,
+      categoryName: categoryBySkuId.get(sku.id) ?? null,
     };
   });
 }
@@ -234,12 +244,28 @@ export default async function DashboardPage() {
     .filter((i) => i.isRisk)
     .sort((a, b) => (a.daysRemaining ?? 999) - (b.daysRemaining ?? 999));
 
-  // Sort products: highest Shopify stock first, nulls last, then zeros.
-  products.sort((a, b) => {
-    if (a.shopifyQty === null && b.shopifyQty === null) return 0;
-    if (a.shopifyQty === null) return 1;
-    if (b.shopifyQty === null) return -1;
-    return b.shopifyQty - a.shopifyQty;
+  // Group products by category, sorted by Shopify qty desc within each group.
+  const productsByCategory = new Map<string, typeof products>();
+  for (const p of products) {
+    const key = p.categoryName ?? "Uncategorised";
+    const group = productsByCategory.get(key) ?? [];
+    group.push(p);
+    productsByCategory.set(key, group);
+  }
+  // Sort each group by shopifyQty desc, nulls last.
+  for (const group of productsByCategory.values()) {
+    group.sort((a, b) => {
+      if (a.shopifyQty === null && b.shopifyQty === null) return 0;
+      if (a.shopifyQty === null) return 1;
+      if (b.shopifyQty === null) return -1;
+      return b.shopifyQty - a.shopifyQty;
+    });
+  }
+  // Category section order: alphabetical, "Uncategorised" last.
+  const categoryGroups = [...productsByCategory.entries()].sort(([a], [b]) => {
+    if (a === "Uncategorised") return 1;
+    if (b === "Uncategorised") return -1;
+    return a.localeCompare(b);
   });
 
   // ── Derive today's tasks (max 3, verb-first) ─────────────────────────────
@@ -393,34 +419,45 @@ export default async function DashboardPage() {
             </h2>
             <span className="text-xs text-zinc-400">Stock shown from Shopify</span>
           </div>
-          <div className="rounded-xl border border-blue-100 bg-blue-50 divide-y divide-blue-100">
-            {products.map((p) => (
-              <div key={p.id} className="flex items-center justify-between gap-4 px-5 py-4">
-                <div>
-                  <p className="font-medium text-zinc-900">{p.name}</p>
-                  {p.canMake === null && (
-                    <p className="mt-0.5 text-xs text-amber-600">No recipe set</p>
-                  )}
-                  {p.canMake === 0 && p.bottleneck && (
-                    <p className="mt-0.5 text-xs text-red-600">Waiting on {p.bottleneck}</p>
-                  )}
-                  {p.canMake === 0 && !p.bottleneck && (
-                    <p className="mt-0.5 text-xs text-zinc-400">No ingredients stocked</p>
-                  )}
-                </div>
-                <div className="text-right shrink-0">
-                  {p.canMake !== null && p.canMake > 0 ? (
-                    <p className="text-lg font-bold text-blue-900">{p.canMake} units</p>
-                  ) : p.canMake !== null ? (
-                    <p className="text-sm font-medium text-zinc-400">Can&apos;t pack yet</p>
-                  ) : null}
-                  <p className="text-xs text-zinc-400">
-                    {p.shopifyQty === null ? "Unknown" : p.shopifyQty} on Shopify
-                  </p>
-                </div>
+          <div className="space-y-3">
+            {categoryGroups.map(([catName, group]) => (
+              <div key={catName} className="rounded-xl border border-blue-100 bg-blue-50 divide-y divide-blue-100">
+                {categoryGroups.length > 1 && (
+                  <div className="px-5 py-2">
+                    <span className="text-xs font-semibold uppercase tracking-widest text-blue-400">
+                      {catName}
+                    </span>
+                  </div>
+                )}
+                {group.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between gap-4 px-5 py-4">
+                    <div>
+                      <p className="font-medium text-zinc-900">{p.name}</p>
+                      {p.canMake === null && (
+                        <p className="mt-0.5 text-xs text-amber-600">No recipe set</p>
+                      )}
+                      {p.canMake === 0 && p.bottleneck && (
+                        <p className="mt-0.5 text-xs text-red-600">Waiting on {p.bottleneck}</p>
+                      )}
+                      {p.canMake === 0 && !p.bottleneck && (
+                        <p className="mt-0.5 text-xs text-zinc-400">No ingredients stocked</p>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      {p.canMake !== null && p.canMake > 0 ? (
+                        <p className="text-lg font-bold text-blue-900">{p.canMake} units</p>
+                      ) : p.canMake !== null ? (
+                        <p className="text-sm font-medium text-zinc-400">Can&apos;t pack yet</p>
+                      ) : null}
+                      <p className="text-xs text-zinc-400">
+                        {p.shopifyQty === null ? "Unknown" : p.shopifyQty} on Shopify
+                      </p>
+                    </div>
+                  </div>
+                ))}
               </div>
             ))}
-            <div className="px-5 py-3">
+            <div className="px-1 py-1">
               <Link
                 href="/packing"
                 className="text-sm font-semibold text-blue-700 hover:text-blue-900 hover:underline"
