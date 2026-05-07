@@ -23,6 +23,14 @@ export interface SyncCatalogResult {
   variantsUpserted: number;
   skusCreated: number;
   skusUpdated: number;
+  /** First 10 variants as returned by Shopify — for diagnostic display only. */
+  sampleVariants: {
+    productTitle: string;
+    variantTitle: string;
+    sku: string | null;
+    shopifyVariantGid: string;
+    shopifyInventoryQty: number | null;
+  }[];
 }
 
 /**
@@ -42,6 +50,7 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
   let variantsUpserted = 0;
   let skusCreated = 0;
   let skusUpdated = 0;
+  const sampleVariants: SyncCatalogResult["sampleVariants"] = [];
 
   for (const product of products) {
     await prisma.shopifyProduct.upsert({
@@ -89,6 +98,20 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
         SET "inventoryQuantity" = ${variant.inventoryQuantity}
         WHERE "shopifyVariantGid" = ${variant.shopifyVariantGid}
       `;
+
+      console.log(
+        `[shopify/sync] variant ${variant.shopifyVariantGid} (${product.title} / ${variant.title}) inventoryQty=${variant.inventoryQuantity}`,
+      );
+
+      if (sampleVariants.length < 10) {
+        sampleVariants.push({
+          productTitle: product.title,
+          variantTitle: variant.title,
+          sku: variant.sku,
+          shopifyVariantGid: variant.shopifyVariantGid,
+          shopifyInventoryQty: variant.inventoryQuantity,
+        });
+      }
 
       variantsUpserted++;
 
@@ -149,7 +172,7 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
     }
   }
 
-  return { productsUpserted, variantsUpserted, skusCreated, skusUpdated };
+  return { productsUpserted, variantsUpserted, skusCreated, skusUpdated, sampleVariants };
 }
 
 // ─── Variant mapping queue ────────────────────────────────────────────────────

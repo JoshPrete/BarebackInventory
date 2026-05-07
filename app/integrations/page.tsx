@@ -21,12 +21,28 @@ export default async function IntegrationsPage() {
     }
   }
 
-  const [mappingCount, skuCount, unmappedCount] = await Promise.all([
+  const [mappingCount, skuCount, unmappedCount, dbVariants] = await Promise.all([
     prisma.shopifyVariantMapping.count(),
     prisma.sellableSKU.count(),
     prisma.sellableSKU.count({
       where: { skuComponentRules: { none: {} } },
     }),
+    // Raw SQL: read inventoryQuantity directly — bypasses stale generated client.
+    prisma.$queryRaw<
+      { productTitle: string; variantTitle: string; sku: string | null; inventoryQuantity: number | null; hasMappingRow: boolean }[]
+    >`
+      SELECT
+        p."title" AS "productTitle",
+        v."title" AS "variantTitle",
+        v."sku",
+        v."inventoryQuantity",
+        (m."id" IS NOT NULL) AS "hasMappingRow"
+      FROM "ShopifyVariant" v
+      JOIN "ShopifyProduct" p ON p."shopifyProductGid" = v."shopifyProductGid"
+      LEFT JOIN "ShopifyVariantMapping" m ON m."shopifyVariantGid" = v."shopifyVariantGid"
+      ORDER BY p."title", v."title"
+      LIMIT 15
+    `,
   ]);
 
   return (
@@ -137,6 +153,53 @@ export default async function IntegrationsPage() {
               </Link>
             </section>
           )}
+
+          {/* ── DB diagnostic ─────────────────────────────────────────────── */}
+          <section className="rounded-lg border border-zinc-200 bg-white p-6 shadow-sm">
+            <h2 className="text-base font-semibold text-zinc-900">
+              Stock diagnostic — DB state
+            </h2>
+            <p className="mt-1 text-xs text-zinc-500">
+              inventoryQuantity stored in ShopifyVariant after last sync. null = never written.
+              hasMappingRow = dashboard can read this variant&apos;s stock.
+            </p>
+            {dbVariants.length === 0 ? (
+              <p className="mt-3 text-sm text-zinc-400">No synced variants — run a sync first.</p>
+            ) : (
+              <div className="mt-3 overflow-x-auto rounded border border-zinc-200">
+                <table className="w-full text-xs">
+                  <thead className="bg-zinc-50 text-zinc-600">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">Product</th>
+                      <th className="px-3 py-2 text-left font-medium">Variant</th>
+                      <th className="px-3 py-2 text-left font-medium">SKU</th>
+                      <th className="px-3 py-2 text-right font-medium">DB qty</th>
+                      <th className="px-3 py-2 text-center font-medium">Mapped</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100">
+                    {dbVariants.map((v, i) => (
+                      <tr key={i} className="hover:bg-zinc-50">
+                        <td className="px-3 py-1.5 text-zinc-700">{v.productTitle}</td>
+                        <td className="px-3 py-1.5 text-zinc-700">{v.variantTitle}</td>
+                        <td className="px-3 py-1.5 font-mono text-zinc-500">{v.sku ?? "—"}</td>
+                        <td className={`px-3 py-1.5 text-right font-mono font-semibold ${v.inventoryQuantity === null ? "text-amber-600" : v.inventoryQuantity > 0 ? "text-emerald-700" : "text-zinc-400"}`}>
+                          {v.inventoryQuantity === null ? "null" : v.inventoryQuantity}
+                        </td>
+                        <td className="px-3 py-1.5 text-center">
+                          {v.hasMappingRow ? (
+                            <span className="text-emerald-600">✓</span>
+                          ) : (
+                            <span className="text-red-500">✗</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
 
         </div>
       </div>

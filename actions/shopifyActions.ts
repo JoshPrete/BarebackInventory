@@ -46,6 +46,14 @@ export type SyncCatalogActionResult = {
   ordersSkipped: number;
   lineItemsImported: number;
   orderErrors: string[];
+  /** First 10 variants as returned by Shopify — for diagnosing inventory sync. */
+  sampleVariants: {
+    productTitle: string;
+    variantTitle: string;
+    sku: string | null;
+    shopifyVariantGid: string;
+    shopifyInventoryQty: number | null;
+  }[];
 } | {
   ok: false;
   error: string;
@@ -84,6 +92,7 @@ export async function syncCatalogFormAction(
       ordersSkipped: orders.ordersSkipped,
       lineItemsImported: orders.lineItemsImported,
       orderErrors: orders.errors,
+      sampleVariants: catalog.sampleVariants,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
