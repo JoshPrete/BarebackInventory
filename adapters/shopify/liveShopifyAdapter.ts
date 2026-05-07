@@ -126,10 +126,8 @@ async function fetchAllProducts(): Promise<ShopifyProductRecord[]> {
 
   do {
     page++;
-    const res = await shopifyAdminGraphql<GqlProductsResponse>(
-      PRODUCTS_QUERY,
-      { cursor },
-    );
+    const res: Awaited<ReturnType<typeof shopifyAdminGraphql<GqlProductsResponse>>> =
+      await shopifyAdminGraphql<GqlProductsResponse>(PRODUCTS_QUERY, { cursor });
 
     if (res.errors?.length) {
       throw new Error(
