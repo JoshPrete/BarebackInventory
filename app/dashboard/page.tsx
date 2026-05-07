@@ -234,6 +234,14 @@ export default async function DashboardPage() {
     .filter((i) => i.isRisk)
     .sort((a, b) => (a.daysRemaining ?? 999) - (b.daysRemaining ?? 999));
 
+  // Sort products: highest Shopify stock first, nulls last, then zeros.
+  products.sort((a, b) => {
+    if (a.shopifyQty === null && b.shopifyQty === null) return 0;
+    if (a.shopifyQty === null) return 1;
+    if (b.shopifyQty === null) return -1;
+    return b.shopifyQty - a.shopifyQty;
+  });
+
   // ── Derive today's tasks (max 3, verb-first) ─────────────────────────────
   type Task = { label: string; detail: string; href: string; cta: string };
   const tasks: Task[] = [];
