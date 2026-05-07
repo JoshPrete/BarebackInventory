@@ -71,17 +71,25 @@ export async function syncShopifyCatalog(): Promise<SyncCatalogResult> {
           sku: variant.sku,
           price: variant.price,
           inventoryItemGid: variant.inventoryItemGid,
-          inventoryQuantity: variant.inventoryQuantity,
         },
         update: {
           title: variant.title,
           sku: variant.sku,
           price: variant.price,
           inventoryItemGid: variant.inventoryItemGid,
-          inventoryQuantity: variant.inventoryQuantity,
           updatedAt: new Date(),
         },
       });
+
+      // Write inventoryQuantity via raw SQL — the generated Prisma client
+      // may not include this field if prisma generate has not re-run locally.
+      // Raw SQL reads/writes the actual DB column regardless of client state.
+      await prisma.$executeRaw`
+        UPDATE "ShopifyVariant"
+        SET "inventoryQuantity" = ${variant.inventoryQuantity}
+        WHERE "shopifyVariantGid" = ${variant.shopifyVariantGid}
+      `;
+
       variantsUpserted++;
 
       // Derive a stable SKU code and human name from Shopify data.

@@ -3,8 +3,9 @@
  * GraphQL API. Only instantiated when Shopify credentials are present in the
  * environment; falls back to mockShopifyAdapter otherwise.
  *
- * Products: fetches up to 250 products (100 variants each), including current
- * inventoryQuantity per variant (requires read_inventory scope).
+ * Products: paginated at 10 products/request to stay under Shopify's 1000-point
+ * GraphQL cost limit. Estimated cost per page ≈ 710 points:
+ *   10 products × (1 + 10 variants × (1 variant + 1 inventoryItem + 5 inventoryLevels))
  *
  * Orders: fetches up to 250 paid orders from the last 30 days by default,
  * or since a provided ISO timestamp. Requires read_orders scope.
@@ -20,19 +21,22 @@ import type {
 
 // ─── Products ─────────────────────────────────────────────────────────────────
 
-// NOTE: ProductVariant.inventoryQuantity was deprecated in Shopify API 2024-04
-// and returns null for inventory-tracked variants in 2025-01+.
-// Use inventoryItem.inventoryLevels instead, summing available qty across locations.
+// Products query — 10 per page to stay under Shopify's 1000-point cost limit.
+// Estimated cost per page ≈ 710 points.
+//
+// NOTE: ProductVariant.inventoryQuantity was deprecated in API 2024-04 and
+// returns null for inventory-tracked variants in 2025-01+. We use
+// inventoryItem.inventoryLevels instead and sum available qty across locations.
 const PRODUCTS_QUERY = `
   query GetProducts($cursor: String) {
-    products(first: 250, after: $cursor) {
+    products(first: 10, after: $cursor) {
       edges {
         node {
           id
           title
           handle
           status
-          variants(first: 100) {
+          variants(first: 10) {
             edges {
               node {
                 id
@@ -41,7 +45,7 @@ const PRODUCTS_QUERY = `
                 price
                 inventoryItem {
                   id
-                  inventoryLevels(first: 20) {
+                  inventoryLevels(first: 5) {
                     edges {
                       node {
                         quantities(names: ["available"]) {
@@ -62,31 +66,29 @@ const PRODUCTS_QUERY = `
   }
 `;
 
+interface GqlVariantNode {
+  id: string;
+  title: string;
+  sku: string | null;
+  price: string;
+  inventoryItem: {
+    id: string;
+    inventoryLevels: {
+      edges: {
+        node: {
+          quantities: { name: string; quantity: number }[];
+        };
+      }[];
+    };
+  } | null;
+}
+
 interface GqlProductNode {
   id: string;
   title: string;
   handle: string;
   status: string;
-  variants: {
-    edges: {
-      node: {
-        id: string;
-        title: string;
-        sku: string | null;
-        price: string;
-        inventoryItem: {
-          id: string;
-          inventoryLevels: {
-            edges: {
-              node: {
-                quantities: { name: string; quantity: number }[];
-              };
-            }[];
-          };
-        } | null;
-      };
-    }[];
-  };
+  variants: { edges: { node: GqlVariantNode }[] };
 }
 
 interface GqlProductsResponse {
@@ -96,38 +98,74 @@ interface GqlProductsResponse {
   };
 }
 
+function mapVariant(v: GqlVariantNode, productGid: string): ShopifyVariantRecord {
+  // Sum available qty across all locations. inventoryItem is null when
+  // Shopify is not managing inventory for this variant.
+  const totalAvailable = v.inventoryItem
+    ? v.inventoryItem.inventoryLevels.edges.reduce((sum, { node: level }) => {
+        const available = level.quantities.find((q) => q.name === "available");
+        return sum + (available?.quantity ?? 0);
+      }, 0)
+    : null;
+
+  return {
+    shopifyVariantGid: v.id,
+    shopifyProductGid: productGid,
+    title: v.title,
+    sku: v.sku ?? null,
+    price: v.price,
+    inventoryQuantity: totalAvailable,
+    inventoryItemGid: v.inventoryItem?.id ?? null,
+  };
+}
+
 async function fetchAllProducts(): Promise<ShopifyProductRecord[]> {
-  const res = await shopifyAdminGraphql<GqlProductsResponse>(PRODUCTS_QUERY);
-  if (res.errors?.length) {
-    throw new Error(`Shopify products query failed: ${res.errors.map((e) => e.message).join(", ")}`);
-  }
+  const allProducts: ShopifyProductRecord[] = [];
+  let cursor: string | null = null;
+  let page = 0;
 
-  return (res.data?.products.edges ?? []).map(({ node: p }): ShopifyProductRecord => ({
-    shopifyProductGid: p.id,
-    title: p.title,
-    handle: p.handle,
-    status: p.status,
-    variants: p.variants.edges.map(({ node: v }): ShopifyVariantRecord => {
-      // Sum available qty across all locations for this variant.
-      // inventoryItem is null when inventory tracking is not managed by Shopify.
-      const totalAvailable = v.inventoryItem
-        ? v.inventoryItem.inventoryLevels.edges.reduce((sum, { node: level }) => {
-            const available = level.quantities.find((q) => q.name === "available");
-            return sum + (available?.quantity ?? 0);
-          }, 0)
-        : null;
+  do {
+    page++;
+    const res = await shopifyAdminGraphql<GqlProductsResponse>(
+      PRODUCTS_QUERY,
+      { cursor },
+    );
 
-      return {
-        shopifyVariantGid: v.id,
+    if (res.errors?.length) {
+      throw new Error(
+        `Shopify products query failed (page ${page}): ${res.errors.map((e) => e.message).join(", ")}`,
+      );
+    }
+
+    const pageData = res.data?.products;
+    if (!pageData) break;
+
+    const pageProducts: ShopifyProductRecord[] = pageData.edges.map(
+      ({ node: p }) => ({
         shopifyProductGid: p.id,
-        title: v.title,
-        sku: v.sku ?? null,
-        price: v.price,
-        inventoryQuantity: totalAvailable,
-        inventoryItemGid: v.inventoryItem?.id ?? null,
-      };
-    }),
-  }));
+        title: p.title,
+        handle: p.handle,
+        status: p.status,
+        variants: p.variants.edges.map(({ node: v }) =>
+          mapVariant(v, p.id),
+        ),
+      }),
+    );
+
+    console.log(
+      `[shopify/products] Page ${page}: fetched ${pageProducts.length} product(s)`,
+    );
+    allProducts.push(...pageProducts);
+
+    cursor = pageData.pageInfo.hasNextPage
+      ? pageData.pageInfo.endCursor
+      : null;
+  } while (cursor !== null);
+
+  console.log(
+    `[shopify/products] Done — ${allProducts.length} product(s) total across ${page} page(s)`,
+  );
+  return allProducts;
 }
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
