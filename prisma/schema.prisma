@@ -9,13 +9,7 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  // DATABASE_URL  — pooler endpoint (used by the app at runtime)
-  // DIRECT_URL    — non-pooler endpoint (used by prisma migrate at build time)
-  // Neon pooler runs in transaction mode and does not support session-level
-  // advisory locks, which prisma migrate deploy requires. directUrl bypasses
-  // the pooler for migrations only.
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
 }
 
 enum ComponentType {
