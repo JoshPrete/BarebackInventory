@@ -53,6 +53,10 @@ export async function deleteCategory(categoryId: string): Promise<void> {
  * Set the classification on a SellableSKU.
  * Uses raw SQL to bypass stale generated Prisma client.
  * Pass null to clear the classification.
+ *
+ * Side-effect: if classification is PACKAGING_ITEM or RAW_COMPONENT_SOLD,
+ * automatically creates a Component record linked to this SKU (idempotent —
+ * does nothing if one already exists).
  */
 export async function setSkuClassification(
   skuId: string,
@@ -69,6 +73,46 @@ export async function setSkuClassification(
       WHERE "id" = ${skuId}
     `;
   }
+
+  // Auto-create a Component for items that are also physical inputs.
+  if (classification === "PACKAGING_ITEM" || classification === "RAW_COMPONENT_SOLD") {
+    const componentType = classification === "PACKAGING_ITEM" ? "Packaging" : "Ingredient";
+
+    // Fetch the SKU name
+    const skuRows = await prisma.$queryRaw<{ name: string }[]>`
+      SELECT "name" FROM "SellableSKU" WHERE "id" = ${skuId}
+    `;
+    if (skuRows.length === 0) {
+      revalidatePath("/skus");
+      revalidatePath("/dashboard");
+      return;
+    }
+    const skuName = skuRows[0].name;
+
+    // Only create if no component is already linked to this SKU
+    const existing = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "Component" WHERE "sourceSkuId" = ${skuId} LIMIT 1
+    `;
+    if (existing.length === 0) {
+      await prisma.$executeRaw`
+        INSERT INTO "Component" ("id", "name", "type", "unit", "reorderPoint", "reorderQty", "createdAt", "sourceSkuId")
+        VALUES (
+          gen_random_uuid()::text,
+          ${skuName},
+          ${componentType},
+          'each',
+          0,
+          0,
+          NOW(),
+          ${skuId}
+        )
+      `;
+    }
+
+    revalidatePath("/components");
+    revalidatePath("/mappings");
+  }
+
   revalidatePath("/skus");
   revalidatePath("/dashboard");
 }

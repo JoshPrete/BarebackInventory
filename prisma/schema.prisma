@@ -106,10 +106,16 @@ model Component {
   reorderPoint      Float
   reorderQty        Float
   createdAt         DateTime            @default(now())
+  /// Set when this component was auto-created from a classified Shopify product.
+  /// Null for manually-added components.
+  sourceSkuId       String?             @unique
+  sourceSku         SellableSKU?        @relation("ComponentSourceSku", fields: [sourceSkuId], references: [id], onDelete: SetNull)
   skuComponentRules SKUComponentRule[]
   stockMovements    StockMovement[]
   receiptLines      ReceiptLine[]
   alerts            Alert[]
+
+  @@index([sourceSkuId])
 }
 
 model Receipt {
@@ -172,6 +178,7 @@ model SellableSKU {
   packedStockMovements PackedStockMovement[]
   shopifyVariantMapping ShopifyVariantMapping?
   alerts               Alert[]
+  sourceComponent      Component?             @relation("ComponentSourceSku")
 
   @@index([categoryId])
 }
