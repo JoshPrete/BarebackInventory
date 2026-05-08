@@ -17,6 +17,15 @@ enum ComponentType {
   PACKAGING
 }
 
+/// How a Shopify product relates to production planning.
+enum SkuClassification {
+  FINISHED_PRODUCT      // has a recipe; drives production planning
+  BUNDLE                // maps to multiple finished products
+  RAW_COMPONENT_SOLD    // sold directly; also tracked as a Component
+  PACKAGING_ITEM        // tracked but no production recipe
+  IGNORED               // exclude from all planning views
+}
+
 enum AlertType {
   LOW_STOCK
   OUT_OF_STOCK
@@ -154,6 +163,8 @@ model SellableSKU {
   name               String
   sku                String                 @unique
   isBundle           Boolean                @default(false)
+  /// How this product relates to production planning. Null = unclassified.
+  classification     SkuClassification?
   /// Optional user-defined category. Null = uncategorised.
   categoryId         String?
   category           ProductCategory?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)

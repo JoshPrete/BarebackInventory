@@ -48,3 +48,27 @@ export async function deleteCategory(categoryId: string): Promise<void> {
   revalidatePath("/dashboard");
   revalidatePath("/packed-stock");
 }
+
+/**
+ * Set the classification on a SellableSKU.
+ * Uses raw SQL to bypass stale generated Prisma client.
+ * Pass null to clear the classification.
+ */
+export async function setSkuClassification(
+  skuId: string,
+  classification: string | null,
+): Promise<void> {
+  if (classification === null) {
+    await prisma.$executeRaw`
+      UPDATE "SellableSKU" SET "classification" = NULL WHERE "id" = ${skuId}
+    `;
+  } else {
+    await prisma.$executeRaw`
+      UPDATE "SellableSKU"
+      SET "classification" = ${classification}::"SkuClassification"
+      WHERE "id" = ${skuId}
+    `;
+  }
+  revalidatePath("/skus");
+  revalidatePath("/dashboard");
+}

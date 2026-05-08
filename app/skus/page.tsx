@@ -4,11 +4,12 @@ import { PageShell } from "@/app/_components/page-shell";
 import { SkuSyncButton } from "@/app/skus/sync-button";
 import { CategorySelect } from "@/app/skus/category-select";
 import { AddCategoryForm } from "@/app/skus/add-category-form";
+import { ClassificationSelect } from "@/app/skus/classification-select";
 
 export const dynamic = "force-dynamic";
 
 export default async function SkusPage() {
-  const [skus, categories] = await Promise.all([
+  const [skus, categories, classificationRows] = await Promise.all([
     prisma.sellableSKU.findMany({
       orderBy: { name: "asc" },
       select: {
@@ -24,10 +25,19 @@ export default async function SkusPage() {
       orderBy: { name: "asc" },
       select: { id: true, name: true },
     }),
+    // classification not in stale generated client — read via raw SQL
+    prisma.$queryRaw<{ id: string; classification: string | null }[]>`
+      SELECT "id", "classification" FROM "SellableSKU"
+    `,
   ]);
+
+  const classificationById = new Map(
+    classificationRows.map((r) => [r.id, r.classification]),
+  );
 
   const needsRecipe = skus.filter((s) => s._count.skuComponentRules === 0).length;
   const ready = skus.length - needsRecipe;
+  const unclassified = skus.filter((s) => !classificationById.get(s.id)).length;
 
   return (
     <PageShell
@@ -60,6 +70,20 @@ export default async function SkusPage() {
           </div>
         )}
 
+        {/* Unclassified callout */}
+        {skus.length > 0 && unclassified > 0 && (
+          <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-5 py-4">
+            <div>
+              <p className="text-sm font-semibold text-blue-900">
+                {unclassified} product{unclassified !== 1 ? "s" : ""} not yet classified
+              </p>
+              <p className="mt-0.5 text-xs text-blue-700">
+                Set a type for each product so the planning engine knows what to do with it.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Needs-recipe callout */}
         {skus.length > 0 && needsRecipe > 0 && (
           <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-5 py-4">
@@ -82,6 +106,7 @@ export default async function SkusPage() {
                 <tr>
                   <th className="px-4 py-3">Product</th>
                   <th className="px-4 py-3">SKU</th>
+                  <th className="px-4 py-3">Type</th>
                   <th className="px-4 py-3">Category</th>
                   <th className="px-4 py-3">Recipe</th>
                   <th className="px-4 py-3" />
@@ -95,6 +120,12 @@ export default async function SkusPage() {
                     <tr key={s.id} className="hover:bg-zinc-50/60">
                       <td className="px-4 py-3 font-medium text-zinc-900">{s.name}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-500">{s.sku}</td>
+                      <td className="px-4 py-3">
+                        <ClassificationSelect
+                          skuId={s.id}
+                          currentClassification={classificationById.get(s.id) ?? null}
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         <CategorySelect
                           skuId={s.id}
