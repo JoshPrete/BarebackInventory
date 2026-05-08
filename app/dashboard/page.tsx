@@ -92,14 +92,15 @@ async function getIngredientPlanning() {
 // ─── Data: production capacity ────────────────────────────────────────────────
 
 async function getProductionCapacity() {
-  const [skus, categoryRows, bomRules, componentSums, shopifyStock] = await Promise.all([
+  const [skus, skuMetaRows, bomRules, componentSums, shopifyStock] = await Promise.all([
     prisma.sellableSKU.findMany({
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),
-    // Read categoryId + name via raw SQL — categoryId may not be in stale client.
-    prisma.$queryRaw<{ id: string; categoryName: string | null }[]>`
-      SELECT s."id", c."name" AS "categoryName"
+    // Read categoryId, categoryName, and classification via raw SQL — new fields
+    // may not be in the stale generated Prisma client.
+    prisma.$queryRaw<{ id: string; categoryName: string | null; classification: string | null }[]>`
+      SELECT s."id", c."name" AS "categoryName", s."classification"
       FROM "SellableSKU" s
       LEFT JOIN "ProductCategory" c ON c."id" = s."categoryId"
     `,
@@ -113,7 +114,7 @@ async function getProductionCapacity() {
     getShopifyFinishedStock(),
   ]);
 
-  const categoryBySkuId = new Map(categoryRows.map((r) => [r.id, r.categoryName]));
+  const metaBySkuId = new Map(skuMetaRows.map((r) => [r.id, r]));
 
   const componentOnHand = new Map(
     componentSums.map((s) => [s.componentId, s._sum.qtyChange ?? 0]),
@@ -126,12 +127,16 @@ async function getProductionCapacity() {
     rulesBySkuId.set(r.skuId, list);
   }
 
-  return skus.map((sku) => {
+  const all = skus.map((sku) => {
+    const meta = metaBySkuId.get(sku.id);
+    const classification = meta?.classification ?? null;
+    const categoryName = meta?.categoryName ?? null;
     const rules = rulesBySkuId.get(sku.id) ?? [];
     const shopifyQty = shopifyStock.has(sku.id) ? shopifyStock.get(sku.id)! : null;
 
-    const categoryName = categoryBySkuId.get(sku.id) ?? null;
-    if (rules.length === 0) return { id: sku.id, name: sku.name, canMake: null, bottleneck: null, shopifyQty, categoryName };
+    if (rules.length === 0) {
+      return { id: sku.id, name: sku.name, canMake: null, bottleneck: null, shopifyQty, categoryName, classification };
+    }
 
     let canMake = Infinity;
     let bottleneck: string | null = null;
@@ -151,9 +156,16 @@ async function getProductionCapacity() {
       canMake: Math.max(0, canMake === Infinity ? 0 : canMake),
       bottleneck,
       shopifyQty,
-      categoryName: categoryBySkuId.get(sku.id) ?? null,
+      categoryName,
+      classification,
     };
   });
+
+  // Exclude products explicitly marked as IGNORED.
+  // FINISHED_PRODUCT, BUNDLE, and unclassified (null) all appear in planning.
+  // PACKAGING_ITEM and RAW_COMPONENT_SOLD don't belong in production planning.
+  const PLANNING_EXCLUDED = new Set(["IGNORED", "PACKAGING_ITEM", "RAW_COMPONENT_SOLD"]);
+  return all.filter((p) => !PLANNING_EXCLUDED.has(p.classification ?? ""));
 }
 
 // ─── Data: Shopify finished stock ────────────────────────────────────────────

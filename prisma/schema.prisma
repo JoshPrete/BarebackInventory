@@ -12,11 +12,6 @@ datasource db {
   provider = "postgresql"
 }
 
-enum ComponentType {
-  BILTONG_BULK
-  PACKAGING
-}
-
 /// How a Shopify product relates to production planning.
 enum SkuClassification {
   FINISHED_PRODUCT      // has a recipe; drives production planning
@@ -105,7 +100,8 @@ model Alert {
 model Component {
   id                String              @id @default(uuid())
   name              String
-  type              ComponentType
+  /// Free-text label e.g. "Meat / Bulk", "Packaging", "Spice", "Labels"
+  type              String
   unit              String
   reorderPoint      Float
   reorderQty        Float
